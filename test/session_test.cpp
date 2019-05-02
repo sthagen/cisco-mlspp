@@ -11,7 +11,7 @@ protected:
   const CipherList suites{ CipherSuite::P256_SHA256_AES128GCM,
                            CipherSuite::X25519_SHA256_AES128GCM };
   const SignatureScheme scheme = SignatureScheme::Ed25519;
-  const size_t group_size = 5;
+  const size_t group_size = 50;
   const size_t secret_size = 32;
   const bytes group_id = { 0, 1, 2, 3 };
   const bytes user_id = { 4, 5, 6, 7 };
@@ -122,6 +122,20 @@ TEST_F(SessionTest, CreateFullSize)
 {
   for (int i = 0; i < group_size - 1; i += 1) {
     broadcast_add();
+  }
+}
+
+TEST_F(SessionTest, Instrumented)
+{
+  for (int i = 0; i < group_size - 1; i += 1) {
+    mls::test::CryptoMetrics::clear();
+
+    broadcast_add();
+
+    auto update = sessions[i].update(fresh_secret());
+    broadcast(update);
+
+    mls::test::CryptoMetrics::print("add", i);
   }
 }
 

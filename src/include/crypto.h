@@ -88,6 +88,24 @@ private:
 bool
 deterministic_signature_scheme(SignatureScheme scheme);
 
+struct CryptoMetrics
+{
+  static int sha256_invocations;
+  static int sha256_bytes;
+
+  static int hmac_invocations;
+  static int hmac_bytes;
+
+  static int dh_generate;
+  static int dh_agree;
+
+  static int sig_sign;
+  static int sig_verify;
+
+  static void clear();
+  static void print(const std::string& label, int iteration);
+};
+
 }
 
 // Adapt standard pointers so that they can be "typed" to handle

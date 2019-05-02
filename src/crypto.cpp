@@ -9,6 +9,7 @@
 #include "openssl/rand.h"
 #include "openssl/sha.h"
 
+#include <iostream>
 #include <string>
 
 namespace mls {
@@ -34,6 +35,43 @@ deterministic_signature_scheme(SignatureScheme scheme)
     case SignatureScheme::Ed448:
       return true;
   }
+}
+
+int CryptoMetrics::sha256_invocations = 0;
+int CryptoMetrics::sha256_bytes = 0;
+int CryptoMetrics::hmac_invocations = 0;
+int CryptoMetrics::hmac_bytes = 0;
+int CryptoMetrics::dh_generate = 0;
+int CryptoMetrics::dh_agree = 0;
+int CryptoMetrics::sig_sign = 0;
+int CryptoMetrics::sig_verify = 0;
+
+void
+CryptoMetrics::clear()
+{
+  sha256_invocations = 0;
+  sha256_bytes = 0;
+  hmac_invocations = 0;
+  hmac_bytes = 0;
+  dh_generate = 0;
+  dh_agree = 0;
+  sig_sign = 0;
+  sig_verify = 0;
+}
+
+void
+CryptoMetrics::print(const std::string& label, int iteration)
+{
+  std::cout << ">>> " << label << " " << iteration << " :";
+  std::cout << " " << sha256_invocations;
+  std::cout << " " << sha256_bytes;
+  std::cout << " " << hmac_invocations;
+  std::cout << " " << hmac_bytes;
+  std::cout << " " << dh_generate;
+  std::cout << " " << dh_agree;
+  std::cout << " " << sig_sign;
+  std::cout << " " << sig_verify;
+  std::cout << std::endl;
 }
 
 } // namespace test
@@ -711,6 +749,8 @@ Digest::Digest(CipherSuite suite)
 Digest&
 Digest::write(uint8_t byte)
 {
+  test::CryptoMetrics::sha256_bytes += 1;
+
   if (EVP_DigestUpdate(_ctx.get(), &byte, 1) != 1) {
     throw OpenSSLError::current();
   }
@@ -720,6 +760,8 @@ Digest::write(uint8_t byte)
 Digest&
 Digest::write(const bytes& data)
 {
+  test::CryptoMetrics::sha256_bytes += data.size();
+
   if (EVP_DigestUpdate(_ctx.get(), data.data(), data.size()) != 1) {
     throw OpenSSLError::current();
   }
@@ -729,6 +771,8 @@ Digest::write(const bytes& data)
 bytes
 Digest::digest()
 {
+  test::CryptoMetrics::sha256_invocations += 1;
+
   unsigned int outlen = output_size();
   auto out = bytes(outlen);
   auto ptr = out.data();
@@ -751,6 +795,9 @@ Digest::output_size() const
 bytes
 hmac(CipherSuite suite, const bytes& key, const bytes& data)
 {
+  test::CryptoMetrics::hmac_invocations += 1;
+  test::CryptoMetrics::hmac_bytes += data.size();
+
   unsigned int size = 0;
   auto type = ossl_digest_type(digest_type(suite));
   bytes md(EVP_MAX_MD_SIZE);
@@ -1328,6 +1375,8 @@ DHPublicKey::encrypt(const bytes& plaintext) const
 DHPrivateKey
 DHPrivateKey::generate(CipherSuite suite)
 {
+  test::CryptoMetrics::dh_generate += 1;
+
   auto type = ossl_key_type(suite);
   return DHPrivateKey(suite, OpenSSLKey::generate(type));
 }
@@ -1335,6 +1384,8 @@ DHPrivateKey::generate(CipherSuite suite)
 DHPrivateKey
 DHPrivateKey::parse(CipherSuite suite, const bytes& data)
 {
+  test::CryptoMetrics::dh_generate += 1;
+
   auto type = ossl_key_type(suite);
   return DHPrivateKey(suite, OpenSSLKey::parse_private(type, data));
 }
@@ -1342,6 +1393,8 @@ DHPrivateKey::parse(CipherSuite suite, const bytes& data)
 DHPrivateKey
 DHPrivateKey::derive(CipherSuite suite, const bytes& secret)
 {
+  test::CryptoMetrics::dh_generate += 1;
+
   auto type = ossl_key_type(suite);
   return DHPrivateKey(suite, OpenSSLKey::derive(type, secret));
 }
@@ -1358,6 +1411,8 @@ DHPrivateKey::node_derive(CipherSuite suite, const bytes& path_secret)
 bytes
 DHPrivateKey::derive(const DHPublicKey& pub) const
 {
+  test::CryptoMetrics::dh_agree += 1;
+
   if (!_key->can_derive() || !pub._key->can_derive()) {
     throw InvalidParameterError("Inappropriate key(s) for derive");
   }
@@ -1436,6 +1491,8 @@ DHPrivateKey::DHPrivateKey(CipherSuite suite, OpenSSLKey* key)
 bool
 SignaturePublicKey::verify(const bytes& message, const bytes& signature) const
 {
+  test::CryptoMetrics::sig_verify += 1;
+
   if (!_key->can_sign()) {
     throw InvalidParameterError("Inappropriate key for verify");
   }
@@ -1483,6 +1540,8 @@ SignaturePrivateKey::derive(SignatureScheme scheme, const bytes& secret)
 bytes
 SignaturePrivateKey::sign(const bytes& message) const
 {
+  test::CryptoMetrics::sig_sign += 1;
+
   if (!_key->can_sign()) {
     throw InvalidParameterError("Inappropriate key for sign");
   }
