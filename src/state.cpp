@@ -193,23 +193,20 @@ State::negotiate(const bytes& group_id,
   // We have manually guaranteed that `suite` is always initialized
   // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
   auto state = State{ group_id, suite, leaf_secret, identity_priv, credential };
-  auto welcome_add = state.add(user_init_key);
-  state = state.handle(welcome_add.second);
-
-  return InitialInfo(state, welcome_add);
+  return state.add(user_init_key);
 }
 
 ///
 /// Message factories
 ///
 
-std::pair<Welcome, MLSPlaintext>
+std::tuple<Welcome, MLSPlaintext, State>
 State::add(const UserInitKey& user_init_key) const
 {
   return add(_tree.size(), user_init_key);
 }
 
-std::pair<Welcome, MLSPlaintext>
+std::tuple<Welcome, MLSPlaintext, State>
 State::add(uint32_t index, const UserInitKey& user_init_key) const
 {
   if (!user_init_key.verify()) {
@@ -224,13 +221,15 @@ State::add(uint32_t index, const UserInitKey& user_init_key) const
   auto welcome_info_str = welcome_info();
   auto welcome =
     Welcome{ user_init_key.user_init_key_id, *pub, welcome_info_str };
+  auto welcome_tuple = std::make_tuple(welcome);
 
   auto welcome_info_hash = welcome_info_str.hash(_suite);
-  auto add = sign(Add{ LeafIndex{ index }, user_init_key, welcome_info_hash });
-  return std::pair<Welcome, MLSPlaintext>(welcome, add);
+  auto add_state =
+    sign(Add{ LeafIndex{ index }, user_init_key, welcome_info_hash });
+  return std::tuple_cat(welcome_tuple, add_state);
 }
 
-MLSPlaintext
+std::tuple<MLSPlaintext, State>
 State::update(const bytes& leaf_secret)
 {
   auto path = _tree.encrypt(_index, leaf_secret);
@@ -238,7 +237,7 @@ State::update(const bytes& leaf_secret)
   return sign(Update{ path });
 }
 
-MLSPlaintext
+std::tuple<MLSPlaintext, State>
 State::remove(const bytes& evict_secret, uint32_t index) const
 {
   if (index >= _tree.size()) {
@@ -554,7 +553,7 @@ sender_data_mask(CipherSuite suite,
   return mask;
 }
 
-MLSPlaintext
+std::tuple<MLSPlaintext, State>
 State::sign(const GroupOperation& operation) const
 {
   auto next = handle(_index, operation);
@@ -567,7 +566,7 @@ State::sign(const GroupOperation& operation) const
   pt.operation = operation;
   pt.operation.value().confirmation = confirm;
   pt.sign(_identity_priv);
-  return pt;
+  return std::make_tuple(pt, next);
 }
 
 bool

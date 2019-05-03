@@ -25,9 +25,9 @@ public:
   std::pair<bytes, bytes> start(const bytes& group_id,
                                 const bytes& user_init_key);
 
-  std::pair<bytes, bytes> add(const bytes& user_init_key) const;
+  std::pair<bytes, bytes> add(const bytes& user_init_key);
   bytes update(const bytes& leaf_secret);
-  bytes remove(const bytes& evict_secret, uint32_t index) const;
+  bytes remove(const bytes& evict_secret, uint32_t index);
 
   void join(const bytes& welcome, const bytes& add);
   void handle(const bytes& handshake_data);
@@ -40,6 +40,8 @@ protected:
   Credential _credential;
   std::map<epoch_t, State> _state;
   epoch_t _current_epoch;
+
+  std::optional<std::tuple<bytes, State>> _outbound_cache;
 
   void make_init_key();
   void add_state(epoch_t prior_epoch, const State& state);
