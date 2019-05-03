@@ -63,14 +63,18 @@ void
 CryptoMetrics::print(const std::string& label, int iteration)
 {
   std::cout << ">>> " << label << " " << iteration << " :";
+  /*
   std::cout << " " << sha256_invocations;
   std::cout << " " << sha256_bytes;
   std::cout << " " << hmac_invocations;
   std::cout << " " << hmac_bytes;
+  */
   std::cout << " " << dh_generate;
   std::cout << " " << dh_agree;
+  /*
   std::cout << " " << sig_sign;
   std::cout << " " << sig_verify;
+  */
   std::cout << std::endl;
 }
 

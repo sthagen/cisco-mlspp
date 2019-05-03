@@ -25,6 +25,7 @@ protected:
     auto init_secret = fresh_secret();
     auto id_priv = new_identity_key();
     auto cred = Credential::basic(user_id, id_priv);
+
     sessions.push_back({ suites, init_secret, id_priv, cred });
   }
 
@@ -46,6 +47,7 @@ protected:
       }
 
       session.handle(message);
+      mls::test::CryptoMetrics::print("handle", -1);
     }
     check(initial_epoch, except);
   }
@@ -62,20 +64,26 @@ protected:
     auto id_priv = new_identity_key();
     auto cred = Credential::basic(user_id, id_priv);
     auto initial_epoch = sessions[0].current_epoch();
+    mls::test::CryptoMetrics::print("new-member-creds", -1);
 
     TestSession next{ suites, init_secret, id_priv, cred };
+    mls::test::CryptoMetrics::print("new-member-ctor", -1);
 
     // Initial add is different
     if (sessions.size() == 1) {
       auto welcome_add = sessions[0].start(group_id, next.user_init_key());
+      mls::test::CryptoMetrics::print("start", -1);
       next.join(welcome_add.first, welcome_add.second);
+      mls::test::CryptoMetrics::print("join", -1);
       sessions.push_back(next);
       // NB: Don't check epoch change, because it doesn't
       return;
     }
 
     auto welcome_add = sessions[from].add(next.user_init_key());
+    mls::test::CryptoMetrics::print("add", -1);
     next.join(welcome_add.first, welcome_add.second);
+    mls::test::CryptoMetrics::print("join", -1);
     broadcast(welcome_add.second, index);
 
     // Add-in-place vs. add-at-edge
@@ -127,15 +135,18 @@ TEST_F(SessionTest, CreateFullSize)
 
 TEST_F(SessionTest, Instrumented)
 {
-  for (int i = 0; i < group_size - 1; i += 1) {
+
+  for (int i = 0; i < 3; i += 1) {
     mls::test::CryptoMetrics::clear();
 
     broadcast_add();
+    mls::test::CryptoMetrics::print("broadcast-add", i);
 
-    auto update = sessions[i].update(fresh_secret());
+    auto update = sessions[i + 1].update(fresh_secret());
+    mls::test::CryptoMetrics::print("gen-update", i);
+
     broadcast(update);
-
-    mls::test::CryptoMetrics::print("add", i);
+    mls::test::CryptoMetrics::print("broadcast-update", i);
   }
 }
 

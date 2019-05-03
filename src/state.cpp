@@ -131,6 +131,7 @@ State::State(SignaturePrivateKey identity_priv,
 
   // Decrypt the Welcome
   auto welcome_info = welcome.decrypt(init_priv);
+  test::CryptoMetrics::print("join-welcome-decrypt", -1);
 
   // Make sure the WelcomeInfo matches the Add
   if (add.welcome_info_hash != welcome_info.hash(_suite)) {
@@ -152,6 +153,7 @@ State::State(SignaturePrivateKey identity_priv,
   // Add to the tree
   _index = add.index;
   _tree.add_leaf(_index, init_secret, credential);
+  test::CryptoMetrics::print("join-tree-add", -1);
 
   // Ratchet forward into shared state
   update_epoch_secrets(_zero);
@@ -233,8 +235,13 @@ std::tuple<MLSPlaintext, State>
 State::update(const bytes& leaf_secret)
 {
   auto path = _tree.encrypt(_index, leaf_secret);
+  test::CryptoMetrics::print("update-encrypt", -1);
+
   _cached_leaf_secret = leaf_secret;
-  return sign(Update{ path });
+  auto signed_update = sign(Update{ path });
+  test::CryptoMetrics::print("update-sign", -1);
+
+  return signed_update;
 }
 
 std::tuple<MLSPlaintext, State>
