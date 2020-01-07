@@ -79,17 +79,17 @@ protected:
       }
     }
   }
+};
 
-  void interop(const TreeTestVectors::TestCase& tc,
-               CipherSuite test_suite,
-               SignatureScheme test_scheme)
-  {
-    TestRatchetTree tree{ test_suite };
+TEST_F(RatchetTreeTest, Interop)
+{
+  for (const auto& tc : tv.cases) {
+    TestRatchetTree tree{ tc.cipher_suite };
 
     // Add the leaves
     int tci = 0;
     for (uint32_t i = 0; i < tv.leaf_secrets.size(); ++i, ++tci) {
-      auto priv = HPKEPrivateKey::derive(test_suite, tv.leaf_secrets[i]);
+      auto priv = HPKEPrivateKey::derive(tc.cipher_suite, tv.leaf_secrets[i]);
       tree.add_leaf(LeafIndex{ i }, priv.public_key(), tc.credentials[i]);
       tree.encap(LeafIndex{ i }, {}, tv.leaf_secrets[i]);
       assert_tree_eq(tc.trees[tci], tree);
@@ -101,16 +101,6 @@ protected:
       assert_tree_eq(tc.trees[tci], tree);
     }
   }
-};
-
-TEST_F(RatchetTreeTest, Interop)
-{
-  interop(tv.case_p256_p256,
-          CipherSuite::P256_SHA256_AES128GCM,
-          SignatureScheme::P256_SHA256);
-  interop(tv.case_x25519_ed25519,
-          CipherSuite::X25519_SHA256_AES128GCM,
-          SignatureScheme::Ed25519);
 }
 
 TEST_F(RatchetTreeTest, OneMember)
@@ -254,10 +244,7 @@ TEST_F(RatchetTreeTest, EncryptDecrypt)
   // other members
   for (LeafIndex i{ 0 }; i.val < size; i.val += 1) {
     auto secret = random_bytes(32);
-
-    DirectPath path(trees[i.val].cipher_suite());
-    bytes root_path_secret;
-    std::tie(path, root_path_secret) = trees[i.val].encap(i, {}, secret);
+    auto [path, root_path_secret] = trees[i.val].encap(i, {}, secret);
 
     for (size_t j = 0; j < size; ++j) {
       if (i.val == j) {

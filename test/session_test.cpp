@@ -52,7 +52,7 @@ protected:
     auto id_priv = new_identity_key();
     auto init_key = HPKEPrivateKey::derive(suite, init_secret);
     auto cred = Credential::basic(user_id, id_priv);
-    auto client_init_key = ClientInitKey{ init_key, cred };
+    auto client_init_key = ClientInitKey{ suite, init_key, cred };
 
     // Initial add is different
     if (sessions.size() == 0) {
@@ -60,7 +60,7 @@ protected:
       auto my_id_priv = new_identity_key();
       auto my_init_key = HPKEPrivateKey::derive(suite, my_init_secret);
       auto my_cred = Credential::basic(user_id, id_priv);
-      auto my_client_init_key = ClientInitKey{ my_init_key, my_cred };
+      auto my_client_init_key = ClientInitKey{ suite, my_init_key, my_cred };
 
       auto commit_secret = fresh_secret();
       auto [creator, welcome] = Session::start(
@@ -73,10 +73,8 @@ protected:
 
     auto initial_epoch = sessions[0].current_epoch();
 
-    Welcome welcome;
-    bytes add;
     auto add_secret = fresh_secret();
-    std::tie(welcome, add) = sessions[from].add(add_secret, client_init_key);
+    auto [welcome, add] = sessions[from].add(add_secret, client_init_key);
     auto next = Session::join({ client_init_key }, welcome);
     broadcast(add, index);
 
@@ -149,7 +147,7 @@ TEST_F(SessionTest, CiphersuiteNegotiation)
   std::vector<ClientInitKey> ciksA;
   for (auto suiteA : ciphersA) {
     auto init_key = HPKEPrivateKey::generate(suiteA);
-    ciksA.emplace_back(init_key, credA);
+    ciksA.emplace_back(suiteA, init_key, credA);
   }
 
   // Bob supports P-256 and P-521
@@ -160,7 +158,7 @@ TEST_F(SessionTest, CiphersuiteNegotiation)
   std::vector<ClientInitKey> ciksB;
   for (auto suiteB : ciphersB) {
     auto init_key = HPKEPrivateKey::generate(suiteB);
-    ciksB.emplace_back(init_key, credB);
+    ciksB.emplace_back(suiteB, init_key, credB);
   }
 
   auto init_secret = fresh_secret();
@@ -348,31 +346,35 @@ protected:
   void follow_all(const SessionTestVectors::TestCase& tc)
   {
     auto suite = tc.cipher_suite;
-    auto scheme = tc.sig_scheme;
+    auto scheme = tc.signature_scheme;
     DeterministicHPKE lock;
     for (uint32_t i = 0; i < basic_tv.group_size; ++i) {
       bytes seed = { uint8_t(i), 0 };
       auto init_priv = HPKEPrivateKey::derive(suite, seed);
       auto identity_priv = SignaturePrivateKey::derive(scheme, seed);
       auto cred = Credential::basic(seed, identity_priv);
-      auto my_client_init_key = ClientInitKey{ init_priv, cred };
+      auto my_client_init_key = ClientInitKey{ suite, init_priv, cred };
       ASSERT_EQ(my_client_init_key, tc.client_init_keys[i]);
       follow_basic(i, my_client_init_key, tc);
     }
   }
 };
 
-TEST_F(SessionInteropTest, BasicP256)
+TEST_F(SessionInteropTest, Basic)
 {
-  // XXX(rlb@ipv.sx): This test is disabled for the moment becuase
-  // it requires signatures to be reproducible.  Otherwise, the
-  // following endpoint will generate a different message than the
-  // other endpoints have seen.
-  // follow_all(basic_tv.case_p256_p256);
-}
+  for (const auto& tc : basic_tv.cases) {
+    // XXX(rlb@ipv.sx): Tests with randomized signature schemes are disabled for
+    // the moment because the testing scheme here requires signatures to be
+    // reprodudible.  Otherwise, the following endpoint will generate a
+    // different message than the other endpoints have seen.
+    //
+    // Note that encrypted tests are still OK (with deterministic signatures),
+    // since the transcript doesn't cover the MLSCiphertext, in particular, the
+    // sender data nonce and encrypted sender data.
+    if (!deterministic_signature_scheme(tc.signature_scheme)) {
+      continue;
+    }
 
-TEST_F(SessionInteropTest, BasicX25519)
-{
-  follow_all(basic_tv.case_x25519_ed25519);
-  follow_all(basic_tv.case_x25519_ed25519_encrypted);
+    follow_all(tc);
+  }
 }
