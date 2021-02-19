@@ -1,89 +1,180 @@
-#include "crypto.h"
+#include <mls/crypto.h>
+#include <mls/log.h>
 
+#include <iostream>
 #include <string>
+
+using hpke::AEAD;      // NOLINT(misc-unused-using-decls)
+using hpke::Digest;    // NOLINT(misc-unused-using-decls)
+using hpke::HPKE;      // NOLINT(misc-unused-using-decls)
+using hpke::KDF;       // NOLINT(misc-unused-using-decls)
+using hpke::KEM;       // NOLINT(misc-unused-using-decls)
+using hpke::Signature; // NOLINT(misc-unused-using-decls)
+
+using mls::log::Log;
+static const auto log_mod = "crypto"s;
 
 namespace mls {
 
-///
-/// Test mode controls
-///
-
-int DeterministicHPKE::_refct = 0;
-
-///
-/// Metrics
-///
-
-uint32_t CryptoMetrics::fixed_base_dh = 0;
-uint32_t CryptoMetrics::var_base_dh = 0;
-uint32_t CryptoMetrics::digest = 0;
-uint32_t CryptoMetrics::hmac = 0;
-
-CryptoMetrics::Report
-CryptoMetrics::snapshot()
+SignatureScheme
+tls_signature_scheme(Signature::ID id)
 {
-  return {
-    fixed_base_dh,
-    var_base_dh,
-    digest,
-    hmac,
+  switch (id) {
+    case Signature::ID::P256_SHA256:
+      return SignatureScheme::ecdsa_secp256r1_sha256;
+    case Signature::ID::P384_SHA384:
+      return SignatureScheme::ecdsa_secp384r1_sha384;
+    case Signature::ID::P521_SHA512:
+      return SignatureScheme::ecdsa_secp521r1_sha512;
+    case Signature::ID::Ed25519:
+      return SignatureScheme::ed25519;
+    case Signature::ID::Ed448:
+      return SignatureScheme::ed448;
+    case Signature::ID::RSA_SHA256:
+      return SignatureScheme::rsa_pkcs1_sha256;
+    default:
+      throw InvalidParameterError("Unsupported algorithm");
+  }
+}
+
+///
+/// CipherSuites and details
+///
+
+CipherSuite::CipherSuite()
+  : id(ID::unknown)
+{}
+
+CipherSuite::CipherSuite(ID id_in)
+  : id(id_in)
+{}
+
+const CipherSuite::Ciphers&
+CipherSuite::get() const
+{
+  static const auto ciphers_X25519_AES128GCM_SHA256_Ed25519 =
+    CipherSuite::Ciphers{
+      HPKE(KEM::ID::DHKEM_X25519_SHA256,
+           KDF::ID::HKDF_SHA256,
+           AEAD::ID::AES_128_GCM),
+      Digest::get<Digest::ID::SHA256>(),
+      Signature::get<Signature::ID::Ed25519>(),
+    };
+
+  static const auto ciphers_P256_AES128GCM_SHA256_P256 = CipherSuite::Ciphers{
+    HPKE(
+      KEM::ID::DHKEM_P256_SHA256, KDF::ID::HKDF_SHA256, AEAD::ID::AES_128_GCM),
+    Digest::get<Digest::ID::SHA256>(),
+    Signature::get<Signature::ID::P256_SHA256>(),
   };
+
+  static const auto ciphers_X25519_CHACHA20POLY1305_SHA256_Ed25519 =
+    CipherSuite::Ciphers{
+      HPKE(KEM::ID::DHKEM_X448_SHA512,
+           KDF::ID::HKDF_SHA512,
+           AEAD::ID::AES_256_GCM),
+      Digest::get<Digest::ID::SHA512>(),
+      Signature::get<Signature::ID::Ed448>(),
+    };
+
+  static const auto ciphers_X448_AES256GCM_SHA512_Ed448 = CipherSuite::Ciphers{
+    HPKE(
+      KEM::ID::DHKEM_X448_SHA512, KDF::ID::HKDF_SHA512, AEAD::ID::AES_256_GCM),
+    Digest::get<Digest::ID::SHA512>(),
+    Signature::get<Signature::ID::Ed448>(),
+  };
+
+  static const auto ciphers_P521_AES256GCM_SHA512_P521 = CipherSuite::Ciphers{
+    HPKE(
+      KEM::ID::DHKEM_P521_SHA512, KDF::ID::HKDF_SHA512, AEAD::ID::AES_256_GCM),
+    Digest::get<Digest::ID::SHA512>(),
+    Signature::get<Signature::ID::P521_SHA512>(),
+  };
+
+  static const auto ciphers_X448_CHACHA20POLY1305_SHA512_Ed448 =
+    CipherSuite::Ciphers{
+      HPKE(KEM::ID::DHKEM_X448_SHA512,
+           KDF::ID::HKDF_SHA512,
+           AEAD::ID::CHACHA20_POLY1305),
+      Digest::get<Digest::ID::SHA512>(),
+      Signature::get<Signature::ID::Ed448>(),
+    };
+
+  switch (id) {
+    case ID::unknown:
+      throw InvalidParameterError("Uninitialized ciphersuite");
+
+    case ID::X25519_AES128GCM_SHA256_Ed25519:
+      return ciphers_X25519_AES128GCM_SHA256_Ed25519;
+
+    case ID::P256_AES128GCM_SHA256_P256:
+      return ciphers_P256_AES128GCM_SHA256_P256;
+
+    case ID::X25519_CHACHA20POLY1305_SHA256_Ed25519:
+      return ciphers_X25519_CHACHA20POLY1305_SHA256_Ed25519;
+
+    case ID::X448_AES256GCM_SHA512_Ed448:
+      return ciphers_X448_AES256GCM_SHA512_Ed448;
+
+    case ID::P521_AES256GCM_SHA512_P521:
+      return ciphers_P521_AES256GCM_SHA512_P521;
+
+    case ID::X448_CHACHA20POLY1305_SHA512_Ed448:
+      return ciphers_X448_CHACHA20POLY1305_SHA512_Ed448;
+
+    default:
+      throw InvalidParameterError("Unsupported ciphersuite");
+  }
 }
 
-void
-CryptoMetrics::reset()
+struct HKDFLabel
 {
-  fixed_base_dh = 0;
-  var_base_dh = 0;
-  digest = 0;
-  hmac = 0;
-}
+  uint16_t length;
+  bytes label;
+  bytes context;
 
-void
-CryptoMetrics::count_fixed_base_dh()
+  TLS_SERIALIZABLE(length, label, context)
+  TLS_TRAITS(tls::pass, tls::vector<1>, tls::vector<4>)
+};
+
+bytes
+CipherSuite::expand_with_label(const bytes& secret,
+                               const std::string& label,
+                               const bytes& context,
+                               size_t length) const
 {
-  fixed_base_dh += 1;
-}
+  auto mls_label = from_ascii(std::string("mls10 ") + label);
+  auto length16 = static_cast<uint16_t>(length);
+  auto label_bytes = tls::marshal(HKDFLabel{ length16, mls_label, context });
+  auto derived = get().hpke.kdf.expand(secret, label_bytes, length);
 
-void
-CryptoMetrics::count_var_base_dh()
-{
-  var_base_dh += 1;
-}
+  Log::crypto(log_mod, "=== ExpandWithLabel ===");
+  Log::crypto(log_mod, "  secret ", to_hex(secret));
+  Log::crypto(log_mod, "  label  ", to_hex(label_bytes));
+  Log::crypto(log_mod, "  length ", length);
 
-void
-CryptoMetrics::count_digest()
-{
-  digest += 1;
-}
-
-void
-CryptoMetrics::count_hmac()
-{
-  hmac += 1;
-}
-
-///
-/// Pass-through / metrics wrappers
-///
-
-Digest::Digest(CipherSuite suite)
-  : primitive::Digest(suite)
-{
-  CryptoMetrics::count_digest();
+  return derived;
 }
 
 bytes
-hmac(CipherSuite suite, const bytes& key, const bytes& data)
+CipherSuite::derive_secret(const bytes& secret, const std::string& label) const
 {
-  CryptoMetrics::count_hmac();
-  return primitive::hmac(suite, key, data);
+  Log::crypto(log_mod, "=== DeriveSecret ===");
+  return expand_with_label(secret, label, {}, secret_size());
 }
 
-///
-/// HKDF and DeriveSecret
-///
+const std::array<CipherSuite::ID, 6> all_supported_suites = {
+  CipherSuite::ID::X25519_AES128GCM_SHA256_Ed25519,
+  CipherSuite::ID::P256_AES128GCM_SHA256_P256,
+  CipherSuite::ID::X25519_CHACHA20POLY1305_SHA256_Ed25519,
+  CipherSuite::ID::X448_AES256GCM_SHA512_Ed448,
+  CipherSuite::ID::P521_AES256GCM_SHA512_P521,
+  CipherSuite::ID::X448_CHACHA20POLY1305_SHA512_Ed448,
+};
 
+///
+/// Utilities
+///
 bool
 constant_time_eq(const bytes& lhs, const bytes& rhs)
 {
@@ -101,278 +192,60 @@ constant_time_eq(const bytes& lhs, const bytes& rhs)
   return (diff == 0);
 }
 
-bytes
-hkdf_extract(CipherSuite suite, const bytes& salt, const bytes& ikm)
-{
-  return hmac(suite, salt, ikm);
-}
-
-bytes
-zero_bytes(size_t size)
-{
-  bytes out(size);
-  for (auto& b : out) {
-    b = 0;
-  }
-  return out;
-}
-
-// For simplicity, we enforce that size <= Hash.length, so that
-// HKDF-Expand(Secret, Label) reduces to:
-//
-//   HMAC(Secret, Label || 0x01)
-static bytes
-hkdf_expand(CipherSuite suite,
-            const bytes& secret,
-            const bytes& info,
-            size_t size)
-{
-  // Ensure that we need only one hash invocation
-  if (size > Digest(suite).output_size()) {
-    throw InvalidParameterError("Size too big for hkdf_expand");
-  }
-
-  auto label = info;
-  label.push_back(0x01);
-  auto mac = hmac(suite, secret, label);
-  mac.resize(size);
-  return mac;
-}
-
-struct HKDFLabel
-{
-  uint16_t length;
-  tls::opaque<1> label;
-  tls::opaque<4> context;
-
-  TLS_SERIALIZABLE(length, label, context);
-};
-
-bytes
-hkdf_expand_label(CipherSuite suite,
-                  const bytes& secret,
-                  const std::string& label,
-                  const bytes& context,
-                  const size_t length)
-{
-  auto mls_label = to_bytes(std::string("mls10 ") + label);
-  auto length16 = static_cast<uint16_t>(length);
-  HKDFLabel label_str{ length16, mls_label, context };
-  auto label_bytes = tls::marshal(label_str);
-  return hkdf_expand(suite, secret, label_bytes, length);
-}
-
 ///
 /// HPKEPublicKey and HPKEPrivateKey
 ///
-
-enum struct HPKEMode : uint8_t
-{
-  base = 0x00,
-  psk = 0x01,
-  auth = 0x02,
-};
-
-enum struct HPKEKEMID : uint16_t
-{
-  DHKEM_P256 = 0x0001,
-  DHKEM_X25519 = 0x0002,
-  DHKEM_P521 = 0x0003,
-  DHKEM_X448 = 0x0004,
-};
-
-static size_t
-hpke_npk(HPKEKEMID kem)
-{
-  switch (kem) {
-    case HPKEKEMID::DHKEM_P256:
-      return 65;
-    case HPKEKEMID::DHKEM_X25519:
-      return 32;
-    case HPKEKEMID::DHKEM_P521:
-      return 133;
-    case HPKEKEMID::DHKEM_X448:
-      return 56;
-    default:
-      throw InvalidParameterError("Unknown HPKE KEM ID");
-  }
-}
-
-enum struct HPKEKDFID : uint16_t
-{
-  HKDF_SHA256 = 0x0001,
-  HKDF_SHA512 = 0x0002,
-};
-
-enum struct HPKEAEADID : uint16_t
-{
-  AES_GCM_128 = 0x0001,
-  AES_GCM_256 = 0x0002,
-};
-
-static std::tuple<HPKEKEMID, HPKEKDFID, HPKEAEADID>
-hpke_suite(CipherSuite suite)
-{
-  switch (suite) {
-    case CipherSuite::P256_SHA256_AES128GCM:
-      return std::make_tuple(
-        HPKEKEMID::DHKEM_P256, HPKEKDFID::HKDF_SHA256, HPKEAEADID::AES_GCM_128);
-
-    case CipherSuite::P521_SHA512_AES256GCM:
-      return std::make_tuple(
-        HPKEKEMID::DHKEM_P521, HPKEKDFID::HKDF_SHA512, HPKEAEADID::AES_GCM_256);
-
-    case CipherSuite::X25519_SHA256_AES128GCM:
-      return std::make_tuple(HPKEKEMID::DHKEM_X25519,
-                             HPKEKDFID::HKDF_SHA256,
-                             HPKEAEADID::AES_GCM_128);
-
-    case CipherSuite::X448_SHA512_AES256GCM:
-      return std::make_tuple(
-        HPKEKEMID::DHKEM_X448, HPKEKDFID::HKDF_SHA512, HPKEAEADID::AES_GCM_256);
-
-    default:
-      throw InvalidParameterError("Unsupported ciphersuite for HPKE");
-  }
-}
-
-static std::tuple<bytes, bytes>
-dhkem_encap(CipherSuite suite, const bytes& pub, const bytes& seed)
-{
-  bytes ephemeral;
-  CryptoMetrics::count_fixed_base_dh();
-  if (seed.empty()) {
-    ephemeral = primitive::generate(suite);
-  } else {
-    ephemeral = primitive::derive(suite, seed);
-  }
-
-  CryptoMetrics::count_var_base_dh();
-  auto enc = primitive::priv_to_pub(suite, ephemeral);
-  auto zz = primitive::dh(suite, ephemeral, pub);
-  return std::make_tuple(enc, zz);
-}
-
-static bytes
-dhkem_decap(CipherSuite suite, const bytes& priv, const bytes& enc)
-{
-  CryptoMetrics::count_var_base_dh();
-  return primitive::dh(suite, priv, enc);
-}
-
-struct HPKEContext
-{
-  HPKEMode mode;
-  HPKEKEMID kem;
-  HPKEKDFID kdf;
-  HPKEAEADID aead;
-  tls::opaque<0> enc;
-  tls::opaque<0> pkRm;
-  tls::opaque<0> pkIm;
-  tls::opaque<0> psk_id_hash;
-  tls::opaque<0> info_hash;
-
-  TLS_SERIALIZABLE(mode,
-                   kem,
-                   kdf,
-                   aead,
-                   enc,
-                   pkRm,
-                   pkIm,
-                   psk_id_hash,
-                   info_hash)
-};
-
-static std::tuple<bytes, bytes>
-hpke_key_schedule(CipherSuite suite,
-                  const HPKEPublicKey& pkR,
-                  const bytes& enc,
-                  const bytes& zz)
-{
-  auto [kem, kdf, aead] = hpke_suite(suite);
-  auto Npk = hpke_npk(kem);
-  auto Nh = Digest(suite).output_size();
-  auto Nk = suite_key_size(suite);
-  auto Nn = suite_nonce_size(suite);
-
-  // We only support base and no-info.  So we can hard-wire these inputs, and
-  // skip VerifyMode().  We will need to generalize if we support other modes or
-  // non-empty info later.
-  auto mode = HPKEMode::base;
-  auto info = bytes{};
-  auto pkIm = bytes(Npk, 0);
-  auto psk = bytes(Nh, 0);
-  auto psk_id = bytes{};
-
-  auto ctx = tls::marshal(HPKEContext{
-    mode,
-    kem,
-    kdf,
-    aead,
-    enc,
-    pkR.to_bytes(),
-    pkIm,
-    Digest(suite).write(psk_id).digest(),
-    Digest(suite).write(info).digest(),
-  });
-
-  auto key_ctx = to_bytes("hpke key") + ctx;
-  auto nonce_ctx = to_bytes("hpke nonce") + ctx;
-
-  auto secret = hkdf_extract(suite, psk, zz);
-  auto key = hkdf_expand(suite, secret, key_ctx, Nk);
-  auto nonce = hkdf_expand(suite, secret, nonce_ctx, Nn);
-
-  return std::make_tuple(key, nonce);
-}
-
-HPKEPublicKey::HPKEPublicKey(const bytes& data_in)
-  : data(data_in)
-{}
-
 HPKECiphertext
 HPKEPublicKey::encrypt(CipherSuite suite,
                        const bytes& aad,
                        const bytes& pt) const
 {
-  // SetupBaseI
-  bytes seed;
-  if (DeterministicHPKE::enabled()) {
-    seed = to_bytes() + pt;
-  }
-
-  auto [enc, zz] = dhkem_encap(suite, data, seed);
-  auto [key, nonce] = hpke_key_schedule(suite, *this, enc, zz);
-
-  // Context.Encrypt
-  auto ct = primitive::seal(suite, key, nonce, aad, pt);
+  auto pkR = suite.hpke().kem.deserialize(data);
+  auto [enc, ctx] = suite.hpke().setup_base_s(*pkR, {});
+  auto ct = ctx.seal(aad, pt);
   return HPKECiphertext{ enc, ct };
 }
 
-bytes
-HPKEPublicKey::to_bytes() const
+std::tuple<bytes, bytes>
+HPKEPublicKey::do_export(CipherSuite suite,
+                         const std::string& label,
+                         size_t size) const
 {
-  return data;
+  auto label_data = bytes(label.begin(), label.end());
+
+  auto pkR = suite.hpke().kem.deserialize(data);
+  auto [enc, ctx] = suite.hpke().setup_base_s(*pkR, {});
+  auto exported = ctx.do_export(label_data, size);
+  return std::make_tuple(enc, exported);
 }
 
 HPKEPrivateKey
 HPKEPrivateKey::generate(CipherSuite suite)
 {
-  CryptoMetrics::count_fixed_base_dh();
-  return HPKEPrivateKey(suite, primitive::generate(suite));
+  auto priv = suite.hpke().kem.generate_key_pair();
+  auto priv_data = suite.hpke().kem.serialize_private(*priv);
+  auto pub = priv->public_key();
+  auto pub_data = suite.hpke().kem.serialize(*pub);
+  return HPKEPrivateKey(priv_data, pub_data);
 }
 
 HPKEPrivateKey
 HPKEPrivateKey::parse(CipherSuite suite, const bytes& data)
 {
-  return HPKEPrivateKey(suite, data);
+  auto priv = suite.hpke().kem.deserialize_private(data);
+  auto pub = priv->public_key();
+  auto pub_data = suite.hpke().kem.serialize(*pub);
+  return HPKEPrivateKey(data, pub_data);
 }
 
 HPKEPrivateKey
 HPKEPrivateKey::derive(CipherSuite suite, const bytes& secret)
 {
-  CryptoMetrics::count_fixed_base_dh();
-  return HPKEPrivateKey(suite, primitive::derive(suite, secret));
+  auto priv = suite.hpke().kem.derive_key_pair(secret);
+  auto priv_data = suite.hpke().kem.serialize_private(*priv);
+  auto pub = priv->public_key();
+  auto pub_data = suite.hpke().kem.serialize(*pub);
+  return HPKEPrivateKey(priv_data, pub_data);
 }
 
 bytes
@@ -380,99 +253,85 @@ HPKEPrivateKey::decrypt(CipherSuite suite,
                         const bytes& aad,
                         const HPKECiphertext& ct) const
 {
-  // SetupBaseR
-  auto zz = dhkem_decap(suite, _data, ct.kem_output);
-  auto [key, nonce] = hpke_key_schedule(suite, public_key(), ct.kem_output, zz);
+  auto skR = suite.hpke().kem.deserialize_private(data);
+  auto ctx = suite.hpke().setup_base_r(ct.kem_output, *skR, {});
+  auto pt = ctx.open(aad, ct.ciphertext);
+  if (!pt) {
+    throw InvalidParameterError("HPKE decryption failure");
+  }
 
-  return primitive::open(suite, key, nonce, aad, ct.ciphertext);
+  return opt::get(pt);
 }
 
-HPKEPublicKey
-HPKEPrivateKey::public_key() const
+bytes
+HPKEPrivateKey::do_export(CipherSuite suite,
+                          const bytes& kem_output,
+                          const std::string& label,
+                          size_t size) const
 {
-  return HPKEPublicKey(_pub_data);
+  auto label_data = bytes(label.begin(), label.end());
+
+  auto skR = suite.hpke().kem.deserialize_private(data);
+  auto ctx = suite.hpke().setup_base_r(kem_output, *skR, {});
+  return ctx.do_export(label_data, size);
 }
 
-HPKEPrivateKey::HPKEPrivateKey(CipherSuite suite, bytes data)
-  : _data(std::move(data))
-  , _pub_data(primitive::priv_to_pub(suite, data))
+HPKEPrivateKey::HPKEPrivateKey(bytes priv_data, bytes pub_data)
+  : data(std::move(priv_data))
+  , public_key{ std::move(pub_data) }
 {}
 
 ///
 /// SignaturePublicKey and SignaturePrivateKey
 ///
-
-SignaturePublicKey::SignaturePublicKey()
-  : _scheme(SignatureScheme::unknown)
-{}
-
-SignaturePublicKey::SignaturePublicKey(SignatureScheme scheme, bytes data)
-  : _scheme(scheme)
-  , _data(std::move(data))
-{}
-
-void
-SignaturePublicKey::set_signature_scheme(SignatureScheme scheme)
-{
-  _scheme = scheme;
-}
-
-SignatureScheme
-SignaturePublicKey::signature_scheme() const
-{
-  return _scheme;
-}
-
-bytes
-SignaturePublicKey::to_bytes() const
-{
-  return _data;
-}
-
 bool
-SignaturePublicKey::verify(const bytes& message, const bytes& signature) const
+SignaturePublicKey::verify(const CipherSuite& suite,
+                           const bytes& message,
+                           const bytes& signature) const
 {
-  return primitive::verify(_scheme, _data, message, signature);
-}
-
-SignaturePrivateKey::SignaturePrivateKey()
-  : _scheme(SignatureScheme::unknown)
-{}
-
-SignaturePrivateKey
-SignaturePrivateKey::generate(SignatureScheme scheme)
-{
-  return SignaturePrivateKey(scheme, primitive::generate(scheme));
+  auto pub = suite.sig().deserialize(data);
+  return suite.sig().verify(message, signature, *pub);
 }
 
 SignaturePrivateKey
-SignaturePrivateKey::parse(SignatureScheme scheme, const bytes& data)
+SignaturePrivateKey::generate(CipherSuite suite)
 {
-  return SignaturePrivateKey(scheme, data);
+  auto priv = suite.sig().generate_key_pair();
+  auto priv_data = suite.sig().serialize_private(*priv);
+  auto pub = priv->public_key();
+  auto pub_data = suite.sig().serialize(*pub);
+  return SignaturePrivateKey(priv_data, pub_data);
 }
 
 SignaturePrivateKey
-SignaturePrivateKey::derive(SignatureScheme scheme, const bytes& secret)
+SignaturePrivateKey::parse(CipherSuite suite, const bytes& data)
 {
-  return SignaturePrivateKey(scheme, primitive::derive(scheme, secret));
+  auto priv = suite.sig().deserialize_private(data);
+  auto pub = priv->public_key();
+  auto pub_data = suite.sig().serialize(*pub);
+  return SignaturePrivateKey(data, pub_data);
+}
+
+SignaturePrivateKey
+SignaturePrivateKey::derive(CipherSuite suite, const bytes& secret)
+{
+  auto priv = suite.sig().derive_key_pair(secret);
+  auto priv_data = suite.sig().serialize_private(*priv);
+  auto pub = priv->public_key();
+  auto pub_data = suite.sig().serialize(*pub);
+  return SignaturePrivateKey(priv_data, pub_data);
 }
 
 bytes
-SignaturePrivateKey::sign(const bytes& message) const
+SignaturePrivateKey::sign(const CipherSuite& suite, const bytes& message) const
 {
-  return primitive::sign(_scheme, _data, message);
+  auto priv = suite.sig().deserialize_private(data);
+  return suite.sig().sign(message, *priv);
 }
 
-SignaturePublicKey
-SignaturePrivateKey::public_key() const
-{
-  return SignaturePublicKey(_scheme, _pub_data);
-}
-
-SignaturePrivateKey::SignaturePrivateKey(SignatureScheme scheme, bytes data)
-  : _scheme(scheme)
-  , _data(std::move(data))
-  , _pub_data(primitive::priv_to_pub(scheme, data))
+SignaturePrivateKey::SignaturePrivateKey(bytes priv_data, bytes pub_data)
+  : data(std::move(priv_data))
+  , public_key{ std::move(pub_data) }
 {}
 
 } // namespace mls

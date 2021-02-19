@@ -1,6 +1,8 @@
-#include "key_schedule.h"
+#include <mls/key_schedule.h>
+#include <mls/log.h>
 
-#include <iostream>
+using mls::log::Log;
+static const auto log_mod = "key_schedule"s;
 
 namespace mls {
 
@@ -17,40 +19,33 @@ zeroize(bytes& data) // NOLINT(google-runtime-references)
 /// Key Derivation Functions
 ///
 
-bytes
-derive_secret(CipherSuite suite,
-              const bytes& secret,
-              const std::string& label,
-              const bytes& context)
-{
-  auto context_hash = Digest(suite).write(context).digest();
-  auto size = Digest(suite).output_size();
-  return hkdf_expand_label(suite, secret, label, context_hash, size);
-}
-
-struct ApplicationContext
+struct TreeContext
 {
   NodeIndex node;
-  uint32_t generation;
+  uint32_t generation = 0;
 
-  ApplicationContext(NodeIndex node_in, uint32_t generation_in)
-    : node(node_in)
-    , generation(generation_in)
-  {}
-
-  TLS_SERIALIZABLE(node, generation);
+  TLS_SERIALIZABLE(node, generation)
 };
 
-bytes
-derive_app_secret(CipherSuite suite,
-                  const bytes& secret,
-                  const std::string& label,
-                  NodeIndex node,
-                  uint32_t generation,
-                  size_t length)
+static bytes
+derive_tree_secret(CipherSuite suite,
+                   const bytes& secret,
+                   const std::string& label,
+                   NodeIndex node,
+                   uint32_t generation,
+                   size_t length)
 {
-  auto ctx = tls::marshal(ApplicationContext{ node, generation });
-  return hkdf_expand_label(suite, secret, label, ctx, length);
+  auto ctx = tls::marshal(TreeContext{ node, generation });
+  auto derived = suite.expand_with_label(secret, label, ctx, length);
+
+  Log::crypto(log_mod, "=== DeriveTreeSecret ===");
+  Log::crypto(log_mod, "  secret       ", to_hex(secret));
+  Log::crypto(log_mod, "  label        ", label);
+  Log::crypto(log_mod, "  node         ", node.val);
+  Log::crypto(log_mod, "  generation   ", generation);
+  Log::crypto(log_mod, "  tree_context ", to_hex(ctx));
+
+  return derived;
 }
 
 ///
@@ -64,19 +59,19 @@ HashRatchet::HashRatchet(CipherSuite suite_in,
   , node(node_in)
   , next_secret(std::move(base_secret_in))
   , next_generation(0)
-  , key_size(suite_key_size(suite_in))
-  , nonce_size(suite_nonce_size(suite_in))
-  , secret_size(Digest(suite).output_size())
+  , key_size(suite.hpke().aead.key_size)
+  , nonce_size(suite.hpke().aead.nonce_size)
+  , secret_size(suite.secret_size())
 {}
 
 std::tuple<uint32_t, KeyAndNonce>
 HashRatchet::next()
 {
-  auto key = derive_app_secret(
+  auto key = derive_tree_secret(
     suite, next_secret, "app-key", node, next_generation, key_size);
-  auto nonce = derive_app_secret(
+  auto nonce = derive_tree_secret(
     suite, next_secret, "app-nonce", node, next_generation, nonce_size);
-  auto secret = derive_app_secret(
+  auto secret = derive_tree_secret(
     suite, next_secret, "app-secret", node, next_generation, secret_size);
 
   auto generation = next_generation;
@@ -127,260 +122,517 @@ HashRatchet::erase(uint32_t generation)
 }
 
 ///
-/// Base Key Sources
+/// SecretTree
 ///
 
-BaseKeySource::BaseKeySource(CipherSuite suite_in)
+SecretTree::SecretTree(CipherSuite suite_in,
+                       LeafCount group_size_in,
+                       bytes encryption_secret_in)
   : suite(suite_in)
-  , secret_size(Digest(suite).output_size())
-{}
-
-struct NoFSBaseKeySource : public BaseKeySource
+  , root(tree_math::root(group_size_in))
+  , group_size(group_size_in)
+  , secrets(NodeCount{ group_size }.val)
+  , secret_size(suite_in.secret_size())
 {
-  bytes root_secret;
+  secrets[root.val] = std::move(encryption_secret_in);
+}
 
-  NoFSBaseKeySource(CipherSuite suite_in, bytes root_secret_in)
-    : BaseKeySource(suite_in)
-    , root_secret(std::move(root_secret_in))
-  {}
-
-  BaseKeySource* dup() const override { return new NoFSBaseKeySource(*this); }
-
-  bytes get(LeafIndex sender) override
-  {
-    return derive_app_secret(
-      suite, root_secret, "hs-secret", NodeIndex{ sender }, 0, secret_size);
-  }
-};
-
-struct TreeBaseKeySource : public BaseKeySource
+bytes
+SecretTree::get(LeafIndex sender)
 {
-  NodeIndex root;
-  NodeCount width;
-  std::vector<bytes> secrets;
-  size_t secret_size;
+  auto node = NodeIndex(sender);
 
-  TreeBaseKeySource(CipherSuite suite_in,
-                    LeafCount group_size,
-                    bytes application_secret_in)
-    : BaseKeySource(suite_in)
-    , root(tree_math::root(NodeCount{ group_size }))
-    , width(NodeCount{ group_size })
-    , secrets(NodeCount{ group_size }.val)
-    , secret_size(Digest(suite_in).output_size())
-  {
-    secrets[root.val] = std::move(application_secret_in);
+  // Find an ancestor that is populated
+  auto dirpath = tree_math::dirpath(node, group_size);
+  dirpath.insert(dirpath.begin(), node);
+  dirpath.push_back(root);
+  uint32_t curr = 0;
+  for (; curr < dirpath.size(); ++curr) {
+    if (!secrets[dirpath[curr].val].empty()) {
+      break;
+    }
   }
 
-  BaseKeySource* dup() const override { return new TreeBaseKeySource(*this); }
+  if (curr > dirpath.size()) {
+    throw InvalidParameterError("No secret found to derive base key");
+  }
 
-  bytes get(LeafIndex sender) override
-  {
-    // Find an ancestor that is populated
-    auto dirpath = tree_math::dirpath(NodeIndex{ sender }, width);
-    dirpath.push_back(tree_math::root(width));
-    uint32_t curr = 0;
-    for (; curr < dirpath.size(); ++curr) {
-      if (!secrets[dirpath[curr].val].empty()) {
-        break;
-      }
-    }
+  // Derive down
+  for (; curr > 0; --curr) {
+    auto curr_node = dirpath[curr];
+    auto left = tree_math::left(curr_node);
+    auto right = tree_math::right(curr_node, group_size);
 
-    if (curr > dirpath.size()) {
-      throw InvalidParameterError("No secret found to derive base key");
-    }
+    auto& secret = secrets[node.val];
+    secrets[left.val] =
+      derive_tree_secret(suite, secret, "tree", left, 0, secret_size);
+    secrets[right.val] =
+      derive_tree_secret(suite, secret, "tree", right, 0, secret_size);
+  }
 
-    // Derive down
-    for (; curr > 0; --curr) {
-      auto node = dirpath[curr];
-      auto left = tree_math::left(node);
-      auto right = tree_math::right(node, width);
+  // Copy the leaf
+  auto out = secrets[node.val];
 
-      auto& secret = secrets[node.val];
-      secrets[left.val] =
-        derive_app_secret(suite, secret, "tree", left, 0, secret_size);
-      secrets[right.val] =
-        derive_app_secret(suite, secret, "tree", right, 0, secret_size);
-    }
+  // Zeroize along the direct path
+  for (auto i : dirpath) {
+    zeroize(secrets[i.val]);
+  }
 
-    // Copy the leaf
-    auto out = secrets[NodeIndex{ sender }.val];
-
-    // Zeroize along the direct path
-    for (auto i : dirpath) {
-      zeroize(secrets[i.val]);
-    }
-
-    return out;
-  };
-};
+  return out;
+}
 
 ///
 /// GroupKeySource
 ///
 
-GroupKeySource::GroupKeySource()
-  : suite(CipherSuite::unknown)
-  , base_source(nullptr)
-{}
-
-GroupKeySource::GroupKeySource(const GroupKeySource& other)
-  : suite(other.suite)
-  , base_source(nullptr)
-  , chains(other.chains)
-{
-  if (other.base_source != nullptr) {
-    base_source.reset(other.base_source->dup());
-  }
-}
-
-GroupKeySource&
-GroupKeySource::operator=(const GroupKeySource& other)
-{
-  suite = other.suite;
-  if (other.base_source != nullptr) {
-    base_source.reset(other.base_source->dup());
-  } else {
-    base_source.reset(nullptr);
-  }
-  chains = other.chains;
-  return *this;
-}
-
-GroupKeySource::GroupKeySource(BaseKeySource* base_source_in)
-  : suite(base_source_in->suite)
-  , base_source(base_source_in)
+GroupKeySource::GroupKeySource(CipherSuite suite_in,
+                               LeafCount group_size,
+                               bytes encryption_secret)
+  : suite(suite_in)
+  , secret_tree(suite, group_size, std::move(encryption_secret))
 {}
 
 HashRatchet&
-GroupKeySource::chain(LeafIndex sender)
+GroupKeySource::chain(RatchetType type, LeafIndex sender)
 {
-  if (chains.count(sender) > 0) {
-    return chains[sender];
+  auto key = Key{ type, sender };
+  if (chains.count(key) > 0) {
+    return chains[key];
   }
 
-  auto base_secret = base_source->get(sender);
-  chains.emplace(sender,
-                 HashRatchet{ suite, NodeIndex{ sender }, base_secret });
-  return chains[sender];
+  auto sender_node = NodeIndex{ sender };
+  auto secret_size = suite.secret_size();
+  auto leaf_secret = secret_tree.get(sender);
+
+  auto handshake_secret = derive_tree_secret(
+    suite, leaf_secret, "handshake", sender_node, 0, secret_size);
+  chains.emplace(
+    std::make_pair(Key{ RatchetType::handshake, sender },
+                   HashRatchet{ suite, sender_node, handshake_secret }));
+
+  auto application_secret = derive_tree_secret(
+    suite, leaf_secret, "application", sender_node, 0, secret_size);
+  chains.emplace(
+    std::make_pair(Key{ RatchetType::application, sender },
+                   HashRatchet{ suite, sender_node, application_secret }));
+
+  return chains[key];
 }
 
 std::tuple<uint32_t, KeyAndNonce>
-GroupKeySource::next(LeafIndex sender)
+GroupKeySource::next(RatchetType type, LeafIndex sender)
 {
-  return chain(sender).next();
+  return chain(type, sender).next();
 }
 
 KeyAndNonce
-GroupKeySource::get(LeafIndex sender, uint32_t generation)
+GroupKeySource::get(RatchetType type, LeafIndex sender, uint32_t generation)
 {
-  return chain(sender).get(generation);
+  return chain(type, sender).get(generation);
 }
 
 void
-GroupKeySource::erase(LeafIndex sender, uint32_t generation)
+GroupKeySource::erase(RatchetType type, LeafIndex sender, uint32_t generation)
 {
-  return chain(sender).erase(generation);
+  return chain(type, sender).erase(generation);
 }
 
-///
-/// FirstEpoch
-///
-
-FirstEpoch
-FirstEpoch::create(CipherSuite suite, const bytes& init_secret)
+// struct {
+//     opaque group_id<0..255>;
+//     uint64 epoch;
+//     ContentType content_type;
+//     opaque authenticated_data<0..2^32-1>;
+// } MLSCiphertextContentAAD;
+struct MLSCiphertextContentAAD
 {
-  auto secret_size = Digest(suite).output_size();
-  auto key_size = suite_key_size(suite);
-  auto nonce_size = suite_nonce_size(suite);
+  const bytes& group_id;
+  const epoch_t epoch;
+  const ContentType content_type;
+  const bytes& authenticated_data;
 
-  auto group_info_secret =
-    hkdf_expand_label(suite, init_secret, "group info", {}, secret_size);
-  auto group_info_key =
-    hkdf_expand_label(suite, group_info_secret, "key", {}, key_size);
-  auto group_info_nonce =
-    hkdf_expand_label(suite, group_info_secret, "nonce", {}, nonce_size);
+  TLS_SERIALIZABLE(group_id, epoch, content_type, authenticated_data)
+  TLS_TRAITS(tls::vector<1>, tls::pass, tls::pass, tls::vector<4>)
+};
 
-  return FirstEpoch{
-    suite, init_secret, group_info_secret, group_info_key, group_info_nonce
+using ReuseGuard = std::array<uint8_t, 4>;
+
+static ReuseGuard
+new_reuse_guard()
+{
+  auto random = random_bytes(4);
+  auto guard = ReuseGuard();
+  std::copy(random.begin(), random.end(), guard.begin());
+  return guard;
+}
+
+static void
+apply_reuse_guard(const ReuseGuard& guard, bytes& nonce)
+{
+  for (size_t i = 0; i < guard.size(); i++) {
+    nonce.at(i) ^= guard.at(i);
+  }
+}
+
+// struct {
+//     uint32 sender;
+//     uint32 generation;
+//     opaque reuse_guard[4];
+// } MLSSenderData;
+struct MLSSenderData
+{
+  uint32_t sender;
+  uint32_t generation;
+  ReuseGuard reuse_guard;
+
+  TLS_SERIALIZABLE(sender, generation, reuse_guard)
+};
+
+// struct {
+//     opaque group_id<0..255>;
+//     uint64 epoch;
+//     ContentType content_type;
+// } MLSSenderDataAAD;
+struct MLSSenderDataAAD
+{
+  const bytes& group_id;
+  const epoch_t epoch;
+  const ContentType content_type;
+
+  TLS_SERIALIZABLE(group_id, epoch, content_type)
+  TLS_TRAITS(tls::vector<1>, tls::pass, tls::pass)
+};
+
+MLSCiphertext
+GroupKeySource::encrypt(LeafIndex index,
+                        const bytes& sender_data_secret,
+                        const MLSPlaintext& pt)
+{
+  // Pull from the key schedule
+  static const auto get_key_type = overloaded{
+    [](const ApplicationData& /*unused*/) {
+      return GroupKeySource::RatchetType::application;
+    },
+    [](const Proposal& /*unused*/) {
+      return GroupKeySource::RatchetType::handshake;
+    },
+    [](const Commit& /*unused*/) {
+      return GroupKeySource::RatchetType::handshake;
+    },
   };
+
+  auto key_type = var::visit(get_key_type, pt.content);
+  auto [generation, content_keys] = next(key_type, index);
+
+  // Encrypt the content
+  // XXX(rlb@ipv.sx): Apply padding?
+  auto content = pt.marshal_content(0);
+  auto content_type_val = pt.content_type();
+  auto content_aad = tls::marshal(MLSCiphertextContentAAD{
+    pt.group_id, pt.epoch, content_type_val, pt.authenticated_data });
+
+  auto reuse_guard = new_reuse_guard();
+  apply_reuse_guard(reuse_guard, content_keys.nonce);
+
+  auto content_ct = suite.hpke().aead.seal(
+    content_keys.key, content_keys.nonce, content_aad, content);
+
+  // Encrypt the sender data
+  auto sender_data_obj = MLSSenderData{ index.val, generation, reuse_guard };
+  auto sender_data = tls::marshal(sender_data_obj);
+
+  auto sender_data_keys =
+    KeyScheduleEpoch::sender_data_keys(suite, sender_data_secret, content_ct);
+  auto sender_data_aad =
+    tls::marshal(MLSSenderDataAAD{ pt.group_id, pt.epoch, content_type_val });
+
+  auto encrypted_sender_data = suite.hpke().aead.seal(
+    sender_data_keys.key, sender_data_keys.nonce, sender_data_aad, sender_data);
+
+  // Assemble the MLSCiphertext
+  MLSCiphertext ct;
+  ct.group_id = pt.group_id;
+  ct.epoch = pt.epoch;
+  ct.content_type = content_type_val;
+  ct.encrypted_sender_data = encrypted_sender_data;
+  ct.authenticated_data = pt.authenticated_data;
+  ct.ciphertext = content_ct;
+  return ct;
 }
 
-KeyScheduleEpoch
-FirstEpoch::next(LeafCount size,
-                 const bytes& update_secret,
-                 const bytes& context)
+MLSPlaintext
+GroupKeySource::decrypt(const bytes& sender_data_secret,
+                        const MLSCiphertext& ct)
 {
-  auto epoch_secret = hkdf_extract(suite, init_secret, update_secret);
-  return KeyScheduleEpoch::create(suite, size, epoch_secret, context);
+  // Decrypt and parse the sender data
+  auto sender_data_keys = KeyScheduleEpoch::sender_data_keys(
+    suite, sender_data_secret, ct.ciphertext);
+  auto sender_data_aad =
+    tls::marshal(MLSSenderDataAAD{ ct.group_id, ct.epoch, ct.content_type });
+  auto sender_data_pt = suite.hpke().aead.open(sender_data_keys.key,
+                                               sender_data_keys.nonce,
+                                               sender_data_aad,
+                                               ct.encrypted_sender_data);
+  if (!sender_data_pt) {
+    throw ProtocolError("Sender data decryption failed");
+  }
+
+  auto sender_data = tls::get<MLSSenderData>(opt::get(sender_data_pt));
+  auto sender = LeafIndex(sender_data.sender);
+
+  // Pull from the key schedule
+  auto key_type = GroupKeySource::RatchetType::handshake;
+  switch (ct.content_type) {
+    case ContentType::proposal:
+    case ContentType::commit:
+      key_type = GroupKeySource::RatchetType::handshake;
+      break;
+
+    case ContentType::application:
+      key_type = GroupKeySource::RatchetType::application;
+      break;
+
+    default:
+      throw ProtocolError("Unsupported content type");
+  }
+
+  auto content_keys = get(key_type, sender, sender_data.generation);
+  erase(key_type, sender, sender_data.generation);
+  apply_reuse_guard(sender_data.reuse_guard, content_keys.nonce);
+
+  // Compute the plaintext AAD and decrypt
+  auto content_aad = tls::marshal(MLSCiphertextContentAAD{
+    ct.group_id,
+    ct.epoch,
+    ct.content_type,
+    ct.authenticated_data,
+  });
+  auto content = suite.hpke().aead.open(
+    content_keys.key, content_keys.nonce, content_aad, ct.ciphertext);
+  if (!content) {
+    throw ProtocolError("Content decryption failed");
+  }
+
+  // Set up a new plaintext based on the content
+  return MLSPlaintext{ ct.group_id,
+                       ct.epoch,
+                       { SenderType::member, sender_data.sender },
+                       ct.content_type,
+                       ct.authenticated_data,
+                       opt::get(content) };
 }
 
 ///
 /// KeyScheduleEpoch
 ///
 
-KeyScheduleEpoch
-KeyScheduleEpoch::create(CipherSuite suite,
-                         LeafCount size,
-                         const bytes& epoch_secret,
-                         const bytes& context)
+static bytes
+make_joiner_secret(CipherSuite suite,
+                   const bytes& init_secret,
+                   const bytes& commit_secret)
 {
-  auto sender_data_secret =
-    derive_secret(suite, epoch_secret, "sender data", context);
-  auto handshake_secret =
-    derive_secret(suite, epoch_secret, "handshake", context);
-  auto application_secret = derive_secret(suite, epoch_secret, "app", context);
-  auto confirmation_key =
-    derive_secret(suite, epoch_secret, "confirm", context);
-  auto init_secret = derive_secret(suite, epoch_secret, "init", context);
+  auto pre_joiner_secret = suite.hpke().kdf.extract(init_secret, commit_secret);
+  return suite.derive_secret(pre_joiner_secret, "joiner");
+}
 
-  auto key_size = suite_key_size(suite);
-  auto sender_data_key =
-    hkdf_expand_label(suite, sender_data_secret, "sd key", {}, key_size);
+static bytes
+make_epoch_secret(CipherSuite suite,
+                  const bytes& joiner_secret,
+                  const bytes& psk_secret,
+                  const bytes& context)
+{
+  auto member_secret = suite.hpke().kdf.extract(joiner_secret, psk_secret);
+  return suite.expand_with_label(
+    member_secret, "epoch", context, suite.secret_size());
+}
 
-  auto handshake_base =
-    std::make_unique<NoFSBaseKeySource>(suite, handshake_secret);
-  auto application_base =
-    std::make_unique<TreeBaseKeySource>(suite, size, application_secret);
+KeyScheduleEpoch::KeyScheduleEpoch(CipherSuite suite_in,
+                                   const bytes& joiner_secret,
+                                   const bytes& psk_secret,
+                                   const bytes& context)
+  : suite(suite_in)
+  , joiner_secret(joiner_secret)
+  , epoch_secret(
+      make_epoch_secret(suite_in, joiner_secret, psk_secret, context))
+  , sender_data_secret(suite.derive_secret(epoch_secret, "sender data"))
+  , encryption_secret(suite.derive_secret(epoch_secret, "encryption"))
+  , exporter_secret(suite.derive_secret(epoch_secret, "exporter"))
+  , authentication_secret(suite.derive_secret(epoch_secret, "authentication"))
+  , external_secret(suite.derive_secret(epoch_secret, "external"))
+  , confirmation_key(suite.derive_secret(epoch_secret, "confirm"))
+  , membership_key(suite.derive_secret(epoch_secret, "membership"))
+  , resumption_secret(suite.derive_secret(epoch_secret, "resumption"))
+  , init_secret(suite.derive_secret(epoch_secret, "init"))
+  , external_priv(HPKEPrivateKey::derive(suite, external_secret))
+{}
 
-  return KeyScheduleEpoch{ suite,
-                           epoch_secret,
-                           sender_data_secret,
-                           sender_data_key,
-                           handshake_secret,
-                           GroupKeySource{ handshake_base.release() },
-                           application_secret,
-                           GroupKeySource{ application_base.release() },
-                           confirmation_key,
-                           init_secret };
+KeyScheduleEpoch::KeyScheduleEpoch(CipherSuite suite_in)
+  : suite(suite_in)
+{}
+
+KeyScheduleEpoch::KeyScheduleEpoch(CipherSuite suite_in,
+                                   const bytes& init_secret,
+                                   const bytes& context)
+  : KeyScheduleEpoch(suite_in,
+                     make_joiner_secret(suite_in, init_secret, suite_in.zero()),
+                     suite_in.zero(),
+                     context)
+{}
+
+KeyScheduleEpoch::KeyScheduleEpoch(CipherSuite suite_in,
+                                   const bytes& init_secret,
+                                   const bytes& commit_secret,
+                                   const bytes& psk_secret,
+                                   const bytes& context)
+  : KeyScheduleEpoch(suite_in,
+                     make_joiner_secret(suite_in, init_secret, commit_secret),
+                     psk_secret,
+                     context)
+{}
+
+std::tuple<bytes, bytes>
+KeyScheduleEpoch::external_init(CipherSuite suite,
+                                const HPKEPublicKey& external_pub)
+{
+  auto size = suite.secret_size();
+  return external_pub.do_export(suite, "MLS 1.0 external init", size);
+}
+
+bytes
+KeyScheduleEpoch::receive_external_init(const bytes& kem_output) const
+{
+  auto size = suite.secret_size();
+  return external_priv.do_export(
+    suite, kem_output, "MLS 1.0 external init", size);
 }
 
 KeyScheduleEpoch
-KeyScheduleEpoch::next(LeafCount size,
-                       const bytes& update_secret,
-                       const bytes& context)
+KeyScheduleEpoch::next(const bytes& commit_secret,
+                       const bytes& psk_secret,
+                       const std::optional<bytes>& force_init_secret,
+                       const bytes& context) const
 {
-  auto new_epoch_secret = hkdf_extract(suite, init_secret, update_secret);
-  return KeyScheduleEpoch::create(suite, size, new_epoch_secret, context);
+  auto actual_init_secret = init_secret;
+  if (force_init_secret) {
+    actual_init_secret = opt::get(force_init_secret);
+  }
+
+  return KeyScheduleEpoch(
+    suite, actual_init_secret, commit_secret, psk_secret, context);
+}
+
+GroupKeySource
+KeyScheduleEpoch::encryption_keys(LeafCount size) const
+{
+  return GroupKeySource(suite, size, encryption_secret);
+}
+
+bytes
+KeyScheduleEpoch::membership_tag(const GroupContext& context,
+                                 const MLSPlaintext& pt) const
+{
+  auto tbm = pt.membership_tag_input(context);
+  return suite.digest().hmac(membership_key, tbm);
+}
+
+bytes
+KeyScheduleEpoch::confirmation_tag(const bytes& confirmed_transcript_hash) const
+{
+  return suite.digest().hmac(confirmation_key, confirmed_transcript_hash);
+}
+
+bytes
+KeyScheduleEpoch::do_export(const std::string& label,
+                            const bytes& context,
+                            size_t size) const
+{
+  auto secret = suite.derive_secret(exporter_secret, label);
+  auto context_hash = suite.digest().hash(context);
+  return suite.expand_with_label(secret, "exporter", context_hash, size);
+}
+
+bytes
+KeyScheduleEpoch::welcome_secret(CipherSuite suite,
+                                 const bytes& joiner_secret,
+                                 const bytes& psk_secret)
+{
+  auto extract = suite.hpke().kdf.extract(joiner_secret, psk_secret);
+  return suite.derive_secret(extract, "welcome");
+}
+
+KeyAndNonce
+KeyScheduleEpoch::sender_data_keys(CipherSuite suite,
+                                   const bytes& sender_data_secret,
+                                   const bytes& ciphertext)
+{
+  auto sample_size = suite.secret_size();
+  auto sample = bytes(sample_size);
+  if (ciphertext.size() < sample_size) {
+    sample = ciphertext;
+  } else {
+    sample = bytes(ciphertext.begin(), ciphertext.begin() + sample_size);
+  }
+
+  auto key_size = suite.hpke().aead.key_size;
+  auto nonce_size = suite.hpke().aead.nonce_size;
+  return {
+    suite.expand_with_label(sender_data_secret, "key", sample, key_size),
+    suite.expand_with_label(sender_data_secret, "nonce", sample, nonce_size),
+  };
 }
 
 bool
 operator==(const KeyScheduleEpoch& lhs, const KeyScheduleEpoch& rhs)
 {
-  // NB: Does not compare the GroupKeySource fields, since these are dynamically
-  // generated as needed.  Rather, we check the roots from which they started.
-  auto suite = (lhs.suite == rhs.suite);
   auto epoch_secret = (lhs.epoch_secret == rhs.epoch_secret);
   auto sender_data_secret = (lhs.sender_data_secret == rhs.sender_data_secret);
-  auto sender_data_key = (lhs.sender_data_key == rhs.sender_data_key);
-  auto handshake_secret = (lhs.handshake_secret == rhs.handshake_secret);
-  auto application_secret = (lhs.application_secret == rhs.application_secret);
+  auto encryption_secret = (lhs.encryption_secret == rhs.encryption_secret);
+  auto exporter_secret = (lhs.exporter_secret == rhs.exporter_secret);
   auto confirmation_key = (lhs.confirmation_key == rhs.confirmation_key);
   auto init_secret = (lhs.init_secret == rhs.init_secret);
+  auto external_priv = (lhs.external_priv == rhs.external_priv);
 
-  return suite && epoch_secret && sender_data_secret && sender_data_key &&
-         handshake_secret && application_secret && confirmation_key &&
-         init_secret;
+  return epoch_secret && sender_data_secret && encryption_secret &&
+         exporter_secret && confirmation_key && init_secret && external_priv;
+}
+
+TranscriptHash::TranscriptHash(CipherSuite suite_in)
+  : suite(suite_in)
+{}
+
+void
+TranscriptHash::update(const MLSPlaintext& pt)
+{
+  update_confirmed(pt);
+  update_interim(pt);
+}
+
+void
+TranscriptHash::update_confirmed(const MLSPlaintext& pt)
+{
+  const auto transcript = interim + pt.commit_content();
+  confirmed = suite.digest().hash(transcript);
+}
+
+void
+TranscriptHash::update_interim(const MAC& confirmation_tag)
+{
+  const auto transcript = confirmed + tls::marshal(confirmation_tag);
+  interim = suite.digest().hash(transcript);
+}
+
+void
+TranscriptHash::update_interim(const MLSPlaintext& pt)
+{
+  const auto transcript = confirmed + pt.commit_auth_data();
+  interim = suite.digest().hash(transcript);
+}
+
+bool
+operator==(const TranscriptHash& lhs, const TranscriptHash& rhs)
+{
+  auto confirmed = (lhs.confirmed == rhs.confirmed);
+  auto interim = (lhs.interim == rhs.interim);
+  return confirmed && interim;
 }
 
 } // namespace mls

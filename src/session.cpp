@@ -1,133 +1,372 @@
-#include "session.h"
-#include "common.h"
-#include "state.h"
+#include <mls/session.h>
+
+#include <mls/messages.h>
+#include <mls/state.h>
+
+#include <deque>
 
 namespace mls {
 
-Session::Session()
-  : _current_epoch(0)
-  , _encrypt_handshake(false)
+///
+/// Inner struct declarations for PendingJoin and Session
+///
+
+struct PendingJoin::Inner
+{
+  const CipherSuite suite;
+  const HPKEPrivateKey init_priv;
+  const SignaturePrivateKey sig_priv;
+  const KeyPackage key_package;
+
+  Inner(CipherSuite suite_in,
+        SignaturePrivateKey sig_priv_in,
+        Credential cred_in,
+        const std::optional<KeyPackageOpts>& opts_in);
+
+  static PendingJoin create(CipherSuite suite,
+                            SignaturePrivateKey sig_priv,
+                            Credential cred,
+                            const std::optional<KeyPackageOpts>& opts_in);
+};
+
+struct Session::Inner
+{
+  std::deque<State> history;
+  std::optional<std::tuple<bytes, State>> outbound_cache;
+  bool encrypt_handshake;
+
+  explicit Inner(State state);
+
+  static Session begin(const bytes& group_id,
+                       const HPKEPrivateKey& init_priv,
+                       const SignaturePrivateKey& sig_priv,
+                       const KeyPackage& key_package);
+  static Session join(const HPKEPrivateKey& init_priv,
+                      const SignaturePrivateKey& sig_priv,
+                      const KeyPackage& key_package,
+                      const bytes& welcome_data);
+
+  bytes fresh_secret() const;
+  bytes export_message(const MLSPlaintext& plaintext);
+  MLSPlaintext import_message(const bytes& encoded);
+  void add_state(epoch_t prior_epoch, const State& group_state);
+  State& for_epoch(epoch_t epoch);
+};
+
+///
+/// Client
+///
+
+Client::Client(CipherSuite suite_in,
+               SignaturePrivateKey sig_priv_in,
+               Credential cred_in,
+               std::optional<KeyPackageOpts> opts_in)
+  : suite(suite_in)
+  , sig_priv(std::move(sig_priv_in))
+  , cred(std::move(cred_in))
+  , opts(std::move(opts_in))
 {}
 
-std::tuple<Session, Welcome>
-Session::start(const bytes& group_id,
-               const std::vector<ClientInitKey>& my_client_init_keys,
-               const std::vector<ClientInitKey>& client_init_keys,
-               const bytes& initial_secret)
+Session
+Client::begin_session(const bytes& group_id) const
 {
-  auto [welcome, state] = State::negotiate(
-    group_id, my_client_init_keys, client_init_keys, initial_secret);
+  auto init_priv = HPKEPrivateKey::generate(suite);
+  auto kp = KeyPackage{ suite, init_priv.public_key, cred, sig_priv, opts };
+  return Session::Inner::begin(group_id, init_priv, sig_priv, kp);
+}
 
-  Session session;
-  session.add_state(0, state);
-  return std::make_tuple(session, welcome);
+PendingJoin
+Client::start_join() const
+{
+  return PendingJoin::Inner::create(suite, sig_priv, cred, opts);
+}
+
+///
+/// PendingJoin
+///
+
+PendingJoin::Inner::Inner(CipherSuite suite_in,
+                          SignaturePrivateKey sig_priv_in,
+                          Credential cred_in,
+                          const std::optional<KeyPackageOpts>& opts_in)
+  : suite(suite_in)
+  , init_priv(HPKEPrivateKey::generate(suite))
+  , sig_priv(std::move(sig_priv_in))
+  , key_package(suite,
+                init_priv.public_key,
+                std::move(cred_in),
+                sig_priv,
+                opts_in)
+{}
+
+PendingJoin
+PendingJoin::Inner::create(CipherSuite suite,
+                           SignaturePrivateKey sig_priv,
+                           Credential cred,
+                           const std::optional<KeyPackageOpts>& opts_in)
+{
+  auto inner = std::make_unique<Inner>(
+    suite, std::move(sig_priv), std::move(cred), opts_in);
+  return PendingJoin(inner.release());
+}
+
+PendingJoin::PendingJoin(PendingJoin&& other) noexcept = default;
+
+PendingJoin&
+PendingJoin::operator=(PendingJoin&& other) noexcept = default;
+
+PendingJoin::~PendingJoin() = default;
+
+PendingJoin::PendingJoin(Inner* inner_in)
+  : inner(inner_in)
+{}
+
+bytes
+PendingJoin::key_package() const
+{
+  return tls::marshal(inner->key_package);
 }
 
 Session
-Session::join(const std::vector<ClientInitKey>& client_init_keys,
-              const Welcome& welcome)
+PendingJoin::complete(const bytes& welcome) const
 {
-  Session session;
-  State next(client_init_keys, welcome);
-  session.add_state(0, next);
-  return session;
+  return Session::Inner::join(
+    inner->init_priv, inner->sig_priv, inner->key_package, welcome);
 }
+
+///
+/// Session
+///
+
+Session::Inner::Inner(State state)
+  : history{ std::move(state) }
+  , encrypt_handshake(true)
+{}
+
+Session
+Session::Inner::begin(const bytes& group_id,
+                      const HPKEPrivateKey& init_priv,
+                      const SignaturePrivateKey& sig_priv,
+                      const KeyPackage& key_package)
+{
+  auto state = State(
+    group_id, key_package.cipher_suite, init_priv, sig_priv, key_package, {});
+  auto inner = std::make_unique<Inner>(state);
+  return Session(inner.release());
+}
+
+Session
+Session::Inner::join(const HPKEPrivateKey& init_priv,
+                     const SignaturePrivateKey& sig_priv,
+                     const KeyPackage& key_package,
+                     const bytes& welcome_data)
+{
+  auto welcome = tls::get<Welcome>(welcome_data);
+
+  auto state = State(init_priv, sig_priv, key_package, welcome);
+  auto inner = std::make_unique<Inner>(state);
+  return Session(inner.release());
+}
+
+bytes
+Session::Inner::fresh_secret() const
+{
+  const auto suite = history.front().cipher_suite();
+  return random_bytes(suite.secret_size());
+}
+
+bytes
+Session::Inner::export_message(const MLSPlaintext& plaintext)
+{
+  if (!encrypt_handshake) {
+    return tls::marshal(plaintext);
+  }
+
+  auto ciphertext = history.front().encrypt(plaintext);
+  return tls::marshal(ciphertext);
+}
+
+MLSPlaintext
+Session::Inner::import_message(const bytes& encoded)
+{
+  if (!encrypt_handshake) {
+    return tls::get<MLSPlaintext>(encoded);
+  }
+
+  auto ciphertext = tls::get<MLSCiphertext>(encoded);
+  return history.front().decrypt(ciphertext);
+}
+
+void
+Session::Inner::add_state(epoch_t prior_epoch, const State& state)
+{
+  if (!history.empty() && prior_epoch != history.front().epoch()) {
+    throw MissingStateError("Discontinuity in history");
+  }
+
+  history.emplace_front(state);
+
+  // TODO(rlb) bound the size of the queue
+}
+
+State&
+Session::Inner::for_epoch(epoch_t epoch)
+{
+  for (auto& state : history) {
+    if (state.epoch() == epoch) {
+      return state;
+    }
+  }
+
+  throw MissingStateError("No state for epoch");
+}
+
+Session::Session(Session&& other) noexcept = default;
+
+Session&
+Session::operator=(Session&& other) noexcept = default;
+
+Session::~Session() = default;
+
+Session::Session(Inner* inner_in)
+  : inner(inner_in)
+{}
 
 void
 Session::encrypt_handshake(bool enabled)
 {
-  _encrypt_handshake = enabled;
-}
-
-std::tuple<Welcome, bytes>
-Session::add(const bytes& add_secret, const ClientInitKey& client_init_key)
-{
-  auto proposal = current_state().add(client_init_key);
-  return commit_and_cache(add_secret, proposal);
+  inner->encrypt_handshake = enabled;
 }
 
 bytes
-Session::update(const bytes& leaf_secret)
+Session::add(const bytes& key_package_data)
 {
-  auto proposal = current_state().update(leaf_secret);
-  return std::get<1>(commit_and_cache(leaf_secret, proposal));
+  auto key_package = tls::get<KeyPackage>(key_package_data);
+  auto proposal = inner->history.front().add(key_package);
+  return inner->export_message(proposal);
 }
 
 bytes
-Session::remove(const bytes& evict_secret, uint32_t index)
+Session::update()
 {
-  auto proposal = current_state().remove(LeafIndex{ index });
-  return std::get<1>(commit_and_cache(evict_secret, proposal));
+  auto leaf_secret = inner->fresh_secret();
+  auto proposal = inner->history.front().update(leaf_secret);
+  return inner->export_message(proposal);
 }
 
-std::tuple<Welcome, bytes>
-Session::commit_and_cache(const bytes& secret, const MLSPlaintext& proposal)
+bytes
+Session::remove(uint32_t index)
 {
-  auto state = current_state();
-  state.handle(proposal);
-  auto [commit, welcome, new_state] = state.commit(secret);
+  auto proposal = inner->history.front().remove(RosterIndex{ index });
+  return inner->export_message(proposal);
+}
 
-  tls::ostream w;
-  if (_encrypt_handshake) {
-    auto enc_proposal = state.encrypt(proposal);
-    auto enc_commit = state.encrypt(commit);
-    w << enc_proposal << enc_commit;
-  } else {
-    w << proposal << commit;
+std::tuple<bytes, bytes>
+Session::commit(const bytes& proposal)
+{
+  return commit(std::vector<bytes>{ proposal });
+}
+
+std::tuple<bytes, bytes>
+Session::commit(const std::vector<bytes>& proposals)
+{
+  for (const auto& proposal_data : proposals) {
+    const auto pt = inner->import_message(proposal_data);
+    if (!var::holds_alternative<Proposal>(pt.content)) {
+      throw ProtocolError("Only proposals can be committed");
+    }
+
+    inner->history.front().handle(pt);
   }
-  auto msg = w.bytes();
 
-  _outbound_cache = std::make_tuple(msg, new_state);
-  return std::make_tuple(welcome, msg);
+  return commit();
 }
 
-void
+std::tuple<bytes, bytes>
+Session::commit()
+{
+  auto commit_secret = inner->fresh_secret();
+  auto [commit, welcome, new_state] =
+    inner->history.front().commit(commit_secret, {});
+
+  auto commit_msg = inner->export_message(commit);
+  auto welcome_msg = tls::marshal(welcome);
+
+  inner->outbound_cache = std::make_tuple(commit_msg, new_state);
+  return std::make_tuple(welcome_msg, commit_msg);
+}
+
+bool
 Session::handle(const bytes& handshake_data)
 {
-  auto& state = current_state();
-  MLSPlaintext proposal, commit;
-  tls::istream r(handshake_data);
-  if (_encrypt_handshake) {
-    // TODO(rlb): Verify that epoch of the ciphertext matches that of the
-    // current state
-    MLSCiphertext enc_proposal, enc_commit;
-    r >> enc_proposal >> enc_commit;
-    proposal = state.decrypt(enc_proposal);
-    commit = state.decrypt(enc_commit);
-  } else {
-    r >> proposal >> commit;
+  auto pt = inner->import_message(handshake_data);
+
+  if (pt.sender.sender_type != SenderType::member) {
+    throw ProtocolError("External senders not supported");
   }
 
-  if (proposal.sender == current_state().index()) {
-    if (!_outbound_cache.has_value()) {
+  const auto is_commit = var::holds_alternative<Commit>(pt.content);
+  if (is_commit &&
+      LeafIndex(pt.sender.sender) == inner->history.front().index()) {
+    if (!inner->outbound_cache) {
       throw ProtocolError("Received from self without sending");
     }
 
-    auto message = std::get<0>(_outbound_cache.value());
-    auto next_state = std::get<1>(_outbound_cache.value());
-
-    if (message != handshake_data) {
-      throw ProtocolError("Received different own message");
+    const auto& [msg, state] = opt::get(inner->outbound_cache);
+    if (msg != handshake_data) {
+      throw ProtocolError("Received message different from cached");
     }
 
-    add_state(proposal.epoch, next_state);
-    _outbound_cache = std::nullopt;
-    return;
+    inner->add_state(pt.epoch, state);
+    inner->outbound_cache = std::nullopt;
+    return true;
   }
 
-  state.handle(proposal);
-  auto next = state.handle(commit);
-  if (!next.has_value()) {
-    throw ProtocolError("Commit failed to produce a new state");
+  auto maybe_next_state = inner->history.front().handle(pt);
+  if (!maybe_next_state) {
+    return false;
   }
 
-  add_state(commit.epoch, next.value());
+  inner->add_state(pt.epoch, opt::get(maybe_next_state));
+  return true;
+}
+
+epoch_t
+Session::current_epoch() const
+{
+  return inner->history.front().epoch();
+}
+
+uint32_t
+Session::index() const
+{
+  return inner->history.front().index().val;
+}
+
+bytes
+Session::do_export(const std::string& label,
+                   const bytes& context,
+                   size_t size) const
+{
+  return inner->history.front().do_export(label, context, size);
+}
+
+std::vector<KeyPackage>
+Session::roster() const
+{
+  return inner->history.front().roster();
+}
+
+bytes
+Session::authentication_secret() const
+{
+  return inner->history.front().authentication_secret();
 }
 
 bytes
 Session::protect(const bytes& plaintext)
 {
-  auto ciphertext = current_state().protect(plaintext);
+  auto ciphertext = inner->history.front().protect(plaintext);
   return tls::marshal(ciphertext);
 }
 
@@ -138,64 +377,20 @@ bytes
 Session::unprotect(const bytes& ciphertext)
 {
   auto ciphertext_obj = tls::get<MLSCiphertext>(ciphertext);
-  if (_state.count(ciphertext_obj.epoch) == 0) {
-    throw MissingStateError("No state available to decrypt ciphertext");
-  }
-
-  auto& state = _state.at(ciphertext_obj.epoch);
+  auto& state = inner->for_epoch(ciphertext_obj.epoch);
   return state.unprotect(ciphertext_obj);
-}
-
-void
-Session::add_state(epoch_t prior_epoch, const State& state)
-{
-  // XXX(rlb@ipv.sx) Assumes no epoch collisions, which is clearly
-  // not the case with the current linear updating.
-  _state.emplace(state.epoch(), state);
-
-  // XXX(rlb@ipv.sx) First successor updates the head pointer
-  if (prior_epoch == _current_epoch || _state.size() == 1) {
-    _current_epoch = state.epoch();
-  }
-}
-
-const State&
-Session::current_state() const
-{
-  if (_state.count(_current_epoch) == 0) {
-    throw MissingStateError("No state available for current epoch");
-  }
-
-  return _state.at(_current_epoch);
-}
-
-State&
-Session::current_state()
-{
-  if (_state.count(_current_epoch) == 0) {
-    throw MissingStateError("No state available for current epoch");
-  }
-
-  return _state.at(_current_epoch);
 }
 
 bool
 operator==(const Session& lhs, const Session& rhs)
 {
-  if (lhs._encrypt_handshake != rhs._encrypt_handshake) {
+  if (lhs.inner->encrypt_handshake != rhs.inner->encrypt_handshake) {
     return false;
   }
 
-  if (lhs._current_epoch != rhs._current_epoch) {
-    return false;
-  }
-
-  for (const auto& pair : lhs._state) {
-    if (rhs._state.count(pair.first) == 0) {
-      continue;
-    }
-
-    if (rhs._state.at(pair.first) != pair.second) {
+  auto size = std::min(lhs.inner->history.size(), rhs.inner->history.size());
+  for (size_t i = 0; i < size; i += 1) {
+    if (lhs.inner->history.at(i) != rhs.inner->history.at(i)) {
       return false;
     }
   }

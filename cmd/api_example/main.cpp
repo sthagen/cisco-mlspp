@@ -1,7 +1,7 @@
-#include "credential.h"
-#include "crypto.h"
-#include "messages.h"
-#include "session.h"
+#include "mls/credential.h"
+#include "mls/crypto.h"
+#include "mls/messages.h"
+#include "mls/session.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -9,41 +9,21 @@
 
 using namespace mls;
 
-const auto suite = CipherSuite::X25519_SHA256_AES128GCM;
-const auto scheme = SignatureScheme::Ed25519;
-
-class User
+static Client
+create_client(CipherSuite suite, const std::string& name)
 {
-public:
-  User(const std::string& name)
-  {
-    auto priv = SignaturePrivateKey::generate(scheme);
-    auto id = bytes(name.begin(), name.end());
-    _cred = Credential::basic(id, priv);
-  }
+  auto id = bytes(name.begin(), name.end());
+  auto sig_priv = SignaturePrivateKey::generate(suite);
+  auto cred = Credential::basic(id, sig_priv.public_key);
 
-  ClientInitKey temp_cik()
-  {
-    auto init_key = HPKEPrivateKey::generate(suite);
-    return ClientInitKey{ suite, init_key, _cred };
-  }
+  auto ext_list = ExtensionList{};
+  ext_list.add(KeyIDExtension{ bytes(name.begin(), name.end()) });
 
-  ClientInitKey fresh_cik()
-  {
-    auto cik = temp_cik();
-    _ciks.push_back(cik);
-    return cik;
-  }
+  return Client(suite, sig_priv, cred, { { ext_list } });
+}
 
-  const std::vector<ClientInitKey>& ciks() { return _ciks; }
-
-private:
-  Credential _cred;
-  std::vector<ClientInitKey> _ciks;
-};
-
-void
-verify_send(std::string label, Session& send, Session& recv)
+static void
+verify_send(const std::string& label, Session& send, Session& recv)
 {
   auto plaintext = bytes{ 0, 1, 2, 3 };
   auto encrypted = send.protect(plaintext);
@@ -53,11 +33,39 @@ verify_send(std::string label, Session& send, Session& recv)
   }
 }
 
-void
-verify(std::string label, Session& alice, Session& bob)
+static void
+verify_roster(const std::vector<std::string>& roster, const Session& session)
+{
+  size_t i = 0;
+  for (const auto& kp : session.roster()) {
+    auto key_id = kp.extensions.find<KeyIDExtension>();
+    if (!key_id.has_value()) {
+      throw std::runtime_error("Missing KeyID extensions");
+    }
+
+    auto name_data = opt::get(key_id).key_id;
+    auto name = std::string(name_data.begin(), name_data.end());
+    if (roster[i] != name) {
+      throw std::runtime_error("Roster mismatch");
+    }
+
+    i++;
+  }
+}
+
+static void
+verify(const std::string& label, Session& alice, Session& bob)
 {
   if (alice != bob) {
     throw std::runtime_error(label + ": not equal");
+  }
+
+  if (alice.roster() != bob.roster()) {
+    throw std::runtime_error(label + ": roster not equal");
+  }
+
+  if (alice.authentication_secret() != bob.authentication_secret()) {
+    throw std::runtime_error(label + ": authenticaiton secret not equal");
   }
 
   verify_send(label, alice, bob);
@@ -65,76 +73,87 @@ verify(std::string label, Session& alice, Session& bob)
 }
 
 int
-main()
+main() // NOLINT(bugprone-exception-escape)
 {
+  const auto suite =
+    CipherSuite{ CipherSuite::ID::X25519_AES128GCM_SHA256_Ed25519 };
+
   ////////// DRAMATIS PERSONAE ///////////
 
-  auto alice = User{ "alice" };
-  auto bob = User{ "bob" };
-  auto charlie = User{ "charlie" };
+  auto alice_client = create_client(suite, "alice");
+  auto bob_client = create_client(suite, "bob");
+  auto charlie_client = create_client(suite, "charlie");
 
   ////////// ACT I: CREATION ///////////
 
-  // Bob posts a ClientInitKey
-  auto cikB = bob.fresh_cik();
-
-  // Alice starts a session with Bob
-  auto cikA = alice.temp_cik();
   auto group_id = bytes{ 0, 1, 2, 3 };
-  auto [sessionA, welcome] =
-    Session::start(group_id, { cikA }, { cikB }, random_bytes(32));
-
-  // Bob looks up his CIK based on the welcome, and initializes
-  // his session
-  auto sessionB = Session::join(bob.ciks(), welcome);
-
-  // Alice and Bob should now be on the same page
-  verify("create", sessionA, sessionB);
+  auto alice_session = alice_client.begin_session(group_id);
 
   ////////// ACT II: ADDITION ///////////
 
-  // Charlie posts a ClientInitKey
-  auto cikC1 = charlie.fresh_cik();
+  // Bob and Charlie post KeyPackages
+  auto bob_join = bob_client.start_join();
+  auto charlie_join = charlie_client.start_join();
 
-  // Alice adds Charlie to the session
-  bytes add;
-  std::tie(welcome, add) = sessionA.add(random_bytes(32), cikC1);
+  // Alice adds Bob and Charlie to the session
+  auto add_bob = alice_session.add(bob_join.key_package());
+  auto add_charlie = alice_session.add(charlie_join.key_package());
+  auto [welcome, commit] = alice_session.commit({ add_bob, add_charlie });
+  alice_session.handle(commit);
 
-  // Charlie initializes his session
-  auto sessionC = Session::join(charlie.ciks(), welcome);
+  // Bob and Charlie initialize their sessions
+  auto bob_session = bob_join.complete(welcome);
+  auto charlie_session = charlie_join.complete(welcome);
 
-  // Alice and Bob updates their sessions to reflect Charlie's addition
-  sessionA.handle(add);
-  sessionB.handle(add);
+  verify("add A->B", alice_session, bob_session);
+  verify("add A->C", alice_session, charlie_session);
+  verify("add B->C", bob_session, charlie_session);
 
-  verify("add A->B", sessionA, sessionB);
-  verify("add A->C", sessionA, sessionC);
-  verify("add B->C", sessionB, sessionC);
+  auto alice_bob_charlie =
+    std::vector<std::string>{ "alice", "bob", "charlie" };
+  verify_roster(alice_bob_charlie, alice_session);
+  verify_roster(alice_bob_charlie, bob_session);
+  verify_roster(alice_bob_charlie, charlie_session);
 
   ////////// ACT III: UPDATE ///////////
 
   // Bob updates his key
-  auto update = sessionB.update(random_bytes(32));
+  auto update = bob_session.update();
+  auto [_1, update_commit] = bob_session.commit({ update });
+  silence_unused(_1);
+  bob_session.handle(update_commit);
 
-  // Everyone processes the update
-  sessionA.handle(update);
-  sessionB.handle(update);
-  sessionC.handle(update);
+  // Everyone else processes the update and commit
+  alice_session.handle(update);
+  alice_session.handle(update_commit);
+  charlie_session.handle(update);
+  charlie_session.handle(update_commit);
 
-  verify("update A->B", sessionA, sessionB);
-  verify("update A->C", sessionA, sessionC);
-  verify("update B->C", sessionB, sessionC);
+  verify("update A->B", alice_session, bob_session);
+  verify("update A->C", alice_session, charlie_session);
+  verify("update B->C", bob_session, charlie_session);
+
+  verify_roster(alice_bob_charlie, alice_session);
+  verify_roster(alice_bob_charlie, bob_session);
+  verify_roster(alice_bob_charlie, charlie_session);
 
   ////////// ACT IV: REMOVE ///////////
 
   // Charlie removes Bob
-  auto remove = sessionC.remove(random_bytes(32), 1);
+  auto remove = charlie_session.remove(1);
+  auto [_2, remove_commit] = charlie_session.commit({ remove });
+  silence_unused(_2);
+  charlie_session.handle(remove_commit);
 
   // Alice and Charlie process the message (Bob is gone)
-  sessionA.handle(remove);
-  sessionC.handle(remove);
+  alice_session.handle(remove);
+  alice_session.handle(remove_commit);
 
-  verify("remove A->C", sessionA, sessionC);
+  verify("remove A->C", alice_session, charlie_session);
+
+  auto alice_charlie = std::vector<std::string>{ "alice", "charlie" };
+  verify_roster(alice_charlie, alice_session);
+  verify_roster(alice_charlie, charlie_session);
 
   std::cout << "ok" << std::endl;
   return 0;

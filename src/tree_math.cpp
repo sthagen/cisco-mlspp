@@ -1,10 +1,9 @@
-#include "tree_math.h"
-#include "common.h"
-#include "tls_syntax.h"
+#include "mls/tree_math.h"
+#include "mls/common.h"
 
 #include <algorithm>
 
-static uint32_t one = 0x01;
+static const uint32_t one = 0x01;
 
 namespace mls {
 
@@ -57,8 +56,13 @@ level(NodeIndex x)
 }
 
 NodeIndex
-root(NodeCount w)
+root(LeafCount n)
 {
+  if (n.val == 0) {
+    throw std::runtime_error("Root for zero-size tree is undefined");
+  }
+
+  auto w = NodeCount(n);
   return NodeIndex{ (one << log2(w.val)) - 1 };
 }
 
@@ -73,12 +77,13 @@ left(NodeIndex x)
 }
 
 NodeIndex
-right(NodeIndex x, NodeCount w)
+right(NodeIndex x, LeafCount n)
 {
   if (level(x) == 0) {
     return x;
   }
 
+  auto w = NodeCount(n);
   NodeIndex r{ x.val ^ (uint32_t(0x03) << (level(x) - 1)) };
   while (r.val >= w.val) {
     r = left(r);
@@ -94,13 +99,14 @@ parent_step(NodeIndex x)
 }
 
 NodeIndex
-parent(NodeIndex x, NodeCount w)
+parent(NodeIndex x, LeafCount n)
 {
-  if (x == root(w)) {
+  if (x == root(n)) {
     return x;
   }
 
   auto p = parent_step(x);
+  auto w = NodeCount(n);
   while (p.val >= w.val) {
     p = parent_step(p);
   }
@@ -108,11 +114,11 @@ parent(NodeIndex x, NodeCount w)
 }
 
 NodeIndex
-sibling(NodeIndex x, NodeCount w)
+sibling(NodeIndex x, LeafCount n)
 {
-  auto p = parent(x, w);
+  auto p = parent(x, n);
   if (x.val < p.val) {
-    return right(p, w);
+    return right(p, n);
   }
 
   if (x.val > p.val) {
@@ -124,27 +130,75 @@ sibling(NodeIndex x, NodeCount w)
 }
 
 std::vector<NodeIndex>
-dirpath(NodeIndex x, NodeCount w)
+dirpath(NodeIndex x, LeafCount n)
 {
   std::vector<NodeIndex> d;
 
-  auto r = root(w);
-  for (auto c = x; c.val != r.val; c = parent(c, w)) {
-    d.push_back(c);
+  auto p = parent(x, n);
+  auto r = root(n);
+  while (p.val != r.val) {
+    d.push_back(p);
+    p = parent(p, n);
+  }
+
+  if (x.val != r.val) {
+    d.push_back(p);
   }
 
   return d;
 }
 
 std::vector<NodeIndex>
-copath(NodeIndex x, NodeCount w)
+copath(NodeIndex x, LeafCount n)
 {
-  auto d = dirpath(x, w);
-  std::vector<NodeIndex> c(d.size());
-  for (size_t i = 0; i < d.size(); ++i) {
-    c[i] = sibling(d[i], w);
+  auto d = dirpath(x, n);
+  if (d.empty()) {
+    return std::vector<NodeIndex>();
   }
+
+  std::vector<NodeIndex> path;
+  path.push_back(x);
+  // exclude root
+  for (size_t i = 0; i < d.size() - 1; ++i) {
+    path.push_back(d[i]);
+  }
+
+  std::vector<NodeIndex> c(path.size());
+  for (size_t i = 0; i < path.size(); ++i) {
+    c[i] = sibling(path[i], n);
+  }
+
   return c;
+}
+
+bool
+in_path(NodeIndex x, NodeIndex y)
+{
+  auto lx = level(x);
+  auto ly = level(y);
+  return lx <= ly && (x.val >> (ly + 1) == y.val >> (ly + 1));
+}
+
+// Common ancestor of two leaves
+NodeIndex
+ancestor(LeafIndex l, LeafIndex r)
+{
+  auto ln = NodeIndex(l);
+  auto rn = NodeIndex(r);
+  if (ln == rn) {
+    return ln;
+  }
+
+  uint8_t k = 0;
+  while (ln != rn) {
+    ln.val = ln.val >> 1U;
+    rn.val = rn.val >> 1U;
+    k += 1;
+  }
+
+  uint32_t prefix = ln.val << k;
+  uint32_t stop = (1U << uint8_t(k - 1));
+  return NodeIndex(prefix + (stop - 1));
 }
 
 } // namespace tree_math
