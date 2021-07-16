@@ -5,6 +5,7 @@ project(mlspp
   LANGUAGES CXX
 )
 
+option(TESTING    "Build tests" OFF)
 option(CLANG_TIDY "Perform linting with clang-tidy" OFF)
 option(SANITIZERS "Enable sanitizers" OFF)
 
@@ -21,6 +22,10 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU"
   add_compile_options(-Wall -pedantic -Wextra -Werror -Wmissing-declarations)
 elseif(MSVC)
   add_compile_options(/W4 /WX)
+
+  # MSVC helpfully recommends safer equivalents for things like
+  # getenv, but they are not portable.
+  add_definitions(-D_CRT_SECURE_NO_WARNINGS)  
 endif()
 
 if (SANITIZERS AND (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU"))
@@ -41,10 +46,16 @@ if(CLANG_TIDY)
   endif()
 endif()
 
+if("$ENV{MACOSX_DEPLOYMENT_TARGET}" STREQUAL "10.11")
+  add_compile_options(-DVARIANT_COMPAT)
+endif()
+
 ###
 ### Enable testing
 ###
-enable_testing()
+if(TESTING)
+  enable_testing()
+endif()
 
 ###
 ### Dependencies
@@ -53,32 +64,11 @@ enable_testing()
 # Internal libraries
 add_subdirectory(lib)
 
+# Third-Party libraries in tree
+add_subdirectory(third_party)
+
 # External libraries
 find_package(OpenSSL 1.1 REQUIRED)
-
-# mpark-variant fetched from GitHub
-include( ExternalProject )
-find_package( Git REQUIRED )
-set( MPARK_VARIANT_URL https://github.com/mpark/variant.git )
-set_directory_properties( PROPERTIES EP_PREFIX ${CMAKE_BINARY_DIR}/third_party )
-
-ExternalProject_Add(
-    mpark-variant-extern
-    GIT_REPOSITORY ${MPARK_VARIANT_URL}
-    TIMEOUT 10
-    UPDATE_COMMAND ${GIT_EXECUTABLE} pull
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ""
-    INSTALL_COMMAND ""
-    LOG_DOWNLOAD ON
-   )
-
-ExternalProject_Get_Property( mpark-variant-extern SOURCE_DIR )
-set( MPARK_VARIANT_INCLUDE_DIR ${SOURCE_DIR}/include CACHE INTERNAL "Include folder for mpark-variant" )
-
-add_library( mpark-variant INTERFACE )
-add_dependencies(mpark-variant mpark-variant-extern)
-target_include_directories( mpark-variant INTERFACE ${MPARK_VARIANT_INCLUDE_DIR} )
 
 ###
 ### Library Config
@@ -103,18 +93,13 @@ target_include_directories(${LIB_NAME}
 ###
 ### Tests
 ###
-add_subdirectory(test)
-
-###
-### Applications
-###
-
-add_subdirectory(cmd)
-
+if(TESTING)
+  add_subdirectory(test)
+endif()
 
 ###
 ### Exports
 ###
 set(CMAKE_EXPORT_PACKAGE_REGISTRY ON)
-export(TARGETS mlspp tls_syntax hpke bytes mls_vectors mpark-variant NAMESPACE MLSPP:: FILE MLSPPConfig.cmake)
+export(TARGETS mlspp tls_syntax hpke bytes mls_vectors third_party NAMESPACE MLSPP:: FILE MLSPPConfig.cmake)
 export(PACKAGE MLSPP)

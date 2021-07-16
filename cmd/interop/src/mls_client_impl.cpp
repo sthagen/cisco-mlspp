@@ -114,7 +114,25 @@ MLSClientImpl::JoinGroup(ServerContext* /* context */,
   return catch_wrap([=]() { return join_group(request, response); });
 }
 
+Status
+MLSClientImpl::ExternalJoin(ServerContext* /* context */,
+                            const ExternalJoinRequest* request,
+                            ExternalJoinResponse* response)
+{
+  return catch_wrap([=]() { return external_join(request, response); });
+}
+
 // Access information from a group state
+Status
+MLSClientImpl::PublicGroupState(ServerContext* /* context */,
+                                const PublicGroupStateRequest* request,
+                                PublicGroupStateResponse* response)
+{
+  return state_wrap(request, [=](auto& state) {
+    return public_group_state(state, request, response);
+  });
+}
+
 Status
 MLSClientImpl::StateAuth(ServerContext* /* context */,
                          const StateAuthRequest* request,
@@ -122,6 +140,33 @@ MLSClientImpl::StateAuth(ServerContext* /* context */,
 {
   return state_wrap(
     request, [=](auto& state) { return state_auth(state, request, response); });
+}
+
+Status
+MLSClientImpl::Export(ServerContext* /* context */,
+                      const ExportRequest* request,
+                      ExportResponse* response)
+{
+  return state_wrap(
+    request, [=](auto& state) { return do_export(state, request, response); });
+}
+
+Status
+MLSClientImpl::Protect(ServerContext* /* context */,
+                       const ProtectRequest* request,
+                       ProtectResponse* response)
+{
+  return state_wrap(
+    request, [=](auto& state) { return protect(state, request, response); });
+}
+
+Status
+MLSClientImpl::Unprotect(ServerContext* /* context */,
+                         const UnprotectRequest* request,
+                         UnprotectResponse* response)
+{
+  return state_wrap(
+    request, [=](auto& state) { return unprotect(state, request, response); });
 }
 
 // Operations using a group state
@@ -151,6 +196,16 @@ MLSClientImpl::HandleCommit(ServerContext* /* context */,
 {
   return state_wrap(request, [=](auto& state) {
     return handle_commit(state, request, response);
+  });
+}
+
+Status
+MLSClientImpl::HandleExternalCommit(ServerContext* /* context */,
+                                    const HandleExternalCommitRequest* request,
+                                    HandleExternalCommitResponse* response)
+{
+  return state_wrap(request, [=](auto& state) {
+    return handle_external_commit(state, request, response);
   });
 }
 
@@ -340,12 +395,12 @@ MLSClientImpl::create_group(const CreateGroupRequest* request,
 
   auto init_priv = mls::HPKEPrivateKey::generate(cipher_suite);
   auto sig_priv = mls::SignaturePrivateKey::generate(cipher_suite);
-  auto cred = mls::Credential::basic({}, sig_priv.public_key);
+  auto cred = mls::Credential::basic({}, cipher_suite, sig_priv.public_key);
   auto key_package =
     mls::KeyPackage(cipher_suite, init_priv.public_key, cred, sig_priv, {});
 
   auto state =
-    mls::State(group_id, cipher_suite, init_priv, sig_priv, key_package);
+    mls::State(group_id, cipher_suite, init_priv, sig_priv, key_package, {});
   auto state_id = store_state(std::move(state), request->encrypt_handshake());
 
   response->set_state_id(state_id);
@@ -360,7 +415,7 @@ MLSClientImpl::create_key_package(const CreateKeyPackageRequest* request,
 
   auto init_priv = mls::HPKEPrivateKey::generate(cipher_suite);
   auto sig_priv = mls::SignaturePrivateKey::generate(cipher_suite);
-  auto cred = mls::Credential::basic({}, sig_priv.public_key);
+  auto cred = mls::Credential::basic({}, cipher_suite, sig_priv.public_key);
   auto kp =
     mls::KeyPackage(cipher_suite, init_priv.public_key, cred, sig_priv, {});
 
@@ -385,15 +440,49 @@ MLSClientImpl::join_group(const JoinGroupRequest* request,
   auto welcome_data = string_to_bytes(request->welcome());
   auto welcome = tls::get<mls::Welcome>(welcome_data);
 
-  auto state =
-    mls::State(join->init_priv, join->sig_priv, join->key_package, welcome);
+  auto state = mls::State(
+    join->init_priv, join->sig_priv, join->key_package, welcome, std::nullopt);
   auto state_id = store_state(std::move(state), request->encrypt_handshake());
 
   response->set_state_id(state_id);
   return Status::OK;
 }
 
+Status
+MLSClientImpl::external_join(const ExternalJoinRequest* request,
+                             ExternalJoinResponse* response)
+{
+  auto pgs_data = string_to_bytes(request->public_group_state());
+  auto pgs = tls::get<mls::PublicGroupState>(pgs_data);
+
+  auto init_priv = mls::HPKEPrivateKey::generate(pgs.cipher_suite);
+  auto sig_priv = mls::SignaturePrivateKey::generate(pgs.cipher_suite);
+  auto cred = mls::Credential::basic({}, pgs.cipher_suite, sig_priv.public_key);
+  auto kp =
+    mls::KeyPackage(pgs.cipher_suite, init_priv.public_key, cred, sig_priv, {});
+
+  auto leaf_secret = mls::random_bytes(pgs.cipher_suite.secret_size());
+  auto [commit, state] =
+    mls::State::external_join(leaf_secret, sig_priv, kp, pgs, std::nullopt);
+  auto commit_data = tls::marshal(commit);
+  auto state_id = store_state(std::move(state), request->encrypt_handshake());
+
+  response->set_state_id(state_id);
+  response->set_commit(bytes_to_string(commit_data));
+  return Status::OK;
+}
+
 // Access information from a group state
+Status
+MLSClientImpl::public_group_state(CachedState& entry,
+                                  const PublicGroupStateRequest* /* request */,
+                                  PublicGroupStateResponse* response)
+{
+  auto pgs = tls::marshal(entry.state.public_group_state());
+  response->set_public_group_state(bytes_to_string(pgs));
+  return Status::OK;
+}
+
 Status
 MLSClientImpl::state_auth(CachedState& entry,
                           const StateAuthRequest* /* request */,
@@ -401,6 +490,43 @@ MLSClientImpl::state_auth(CachedState& entry,
 {
   auto secret = entry.state.authentication_secret();
   response->set_state_auth_secret(bytes_to_string(secret));
+  return Status::OK;
+}
+
+Status
+MLSClientImpl::do_export(CachedState& entry,
+                         const ExportRequest* request,
+                         ExportResponse* response)
+{
+  auto label = request->label();
+  auto context = string_to_bytes(request->context());
+  auto size = request->key_length();
+  auto secret = entry.state.do_export(label, context, size);
+  response->set_exported_secret(bytes_to_string(secret));
+  return Status::OK;
+}
+
+Status
+MLSClientImpl::protect(CachedState& entry,
+                       const ProtectRequest* request,
+                       ProtectResponse* response)
+{
+  auto pt = string_to_bytes(request->application_data());
+  auto ct = entry.state.protect(pt);
+  auto ct_data = tls::marshal(ct);
+  response->set_ciphertext(bytes_to_string(ct_data));
+  return Status::OK;
+}
+
+Status
+MLSClientImpl::unprotect(CachedState& entry,
+                         const UnprotectRequest* request,
+                         UnprotectResponse* response)
+{
+  auto ct_data = string_to_bytes(request->ciphertext());
+  auto ct = tls::get<mls::MLSCiphertext>(ct_data);
+  auto pt = entry.state.unprotect(ct);
+  response->set_application_data(bytes_to_string(pt));
   return Status::OK;
 }
 
@@ -453,7 +579,7 @@ MLSClientImpl::commit(CachedState& entry,
   auto leaf_secret =
     mls::random_bytes(entry.state.cipher_suite().secret_size());
   auto [commit, welcome, next] =
-    entry.state.commit(leaf_secret, inline_proposals);
+    entry.state.commit(leaf_secret, mls::CommitOpts{ inline_proposals, true });
 
   auto next_id = store_state(std::move(next), entry.encrypt_handshake);
 
@@ -496,6 +622,25 @@ MLSClientImpl::handle_commit(CachedState& entry,
   }
 
   auto commit = entry.unmarshal(request->commit());
+  auto should_be_next = entry.state.handle(commit);
+  if (!should_be_next) {
+    throw std::runtime_error("Commit failed to produce a new state");
+  }
+
+  auto& next = opt::get(should_be_next);
+  auto next_id = store_state(std::move(next), entry.encrypt_handshake);
+  response->set_state_id(next_id);
+  return Status::OK;
+}
+
+Status
+MLSClientImpl::handle_external_commit(
+  CachedState& entry,
+  const HandleExternalCommitRequest* request,
+  HandleExternalCommitResponse* response)
+{
+  auto commit_data = string_to_bytes(request->commit());
+  auto commit = tls::get<mls::MLSPlaintext>(commit_data);
   auto should_be_next = entry.state.handle(commit);
   if (!should_be_next) {
     throw std::runtime_error("Commit failed to produce a new state");

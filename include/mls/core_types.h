@@ -10,13 +10,22 @@ namespace mls {
 /// Extensions
 ///
 
+// enum {
+//   reserved(0),
+//   mls10(1),
+//   (255)
+// } ProtocolVersion;
 enum class ProtocolVersion : uint8_t
 {
-  mls10 = 0xFF,
+  mls10 = 0x01,
 };
 
 extern const std::array<ProtocolVersion, 1> all_supported_versions;
 
+// struct {
+//     ExtensionType extension_type;
+//     opaque extension_data<0..2^32-1>;
+// } Extension;
 struct Extension
 {
   using Type = uint16_t;
@@ -25,7 +34,7 @@ struct Extension
   bytes data;
 
   TLS_SERIALIZABLE(type, data)
-  TLS_TRAITS(tls::pass, tls::vector<2>)
+  TLS_TRAITS(tls::pass, tls::vector<4>)
 };
 
 struct ExtensionType
@@ -73,7 +82,7 @@ struct ExtensionList
   ExtensionList for_group() const;
 
   TLS_SERIALIZABLE(extensions)
-  TLS_TRAITS(tls::vector<2>)
+  TLS_TRAITS(tls::vector<4>)
 };
 
 struct CapabilitiesExtension
@@ -133,9 +142,9 @@ struct ParentNode
 // struct {
 //     ProtocolVersion version;
 //     CipherSuite cipher_suite;
-//     HPKEPublicKey init_key;
+//     HPKEPublicKey hpke_init_key;
 //     Credential credential;
-//     Extension extensions<0..2^16-1>;
+//     Extension extensions<8..2^32-1>;
 //     opaque signature<0..2^16-1>;
 // } KeyPackage;
 struct KeyPackageOpts
@@ -169,24 +178,17 @@ struct KeyPackage
   bool verify_extension_support(const ExtensionList& ext_list) const;
   bool verify() const;
 
-  TLS_SERIALIZABLE(version,
-                   cipher_suite,
-                   init_key,
-                   credential,
-                   extensions,
-                   signature)
-  TLS_TRAITS(tls::pass,
-             tls::pass,
-             tls::pass,
-             tls::pass,
-             tls::pass,
-             tls::vector<2>)
-
 private:
   bytes to_be_signed() const;
 
   friend bool operator==(const KeyPackage& lhs, const KeyPackage& rhs);
 };
+
+tls::ostream&
+operator<<(tls::ostream& str, const KeyPackage& kp);
+
+tls::istream&
+operator>>(tls::istream& str, KeyPackage& kp);
 
 bool
 operator==(const KeyPackage& lhs, const KeyPackage& rhs);
@@ -205,7 +207,7 @@ struct RatchetNode
   std::vector<HPKECiphertext> node_secrets;
 
   TLS_SERIALIZABLE(public_key, node_secrets)
-  TLS_TRAITS(tls::pass, tls::vector<2>)
+  TLS_TRAITS(tls::pass, tls::vector<4>)
 };
 
 // struct {
@@ -217,7 +219,7 @@ struct UpdatePath
   std::vector<RatchetNode> nodes;
 
   TLS_SERIALIZABLE(leaf_key_package, nodes)
-  TLS_TRAITS(tls::pass, tls::vector<2>)
+  TLS_TRAITS(tls::pass, tls::vector<4>)
 };
 
 } // namespace mls

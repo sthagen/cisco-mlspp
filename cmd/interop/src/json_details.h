@@ -1,24 +1,23 @@
+#pragma once
+
 #include <mls_vectors/mls_vectors.h>
 #include <nlohmann/json.hpp>
 
-#include <iostream>
+using nlohmann::json;
 
 ///
 /// Serializers for foreign types
 ///
+
+// HexBytes
+namespace mls_vectors {
+void
+to_json(json& j, const HexBytes& v);
+void
+from_json(const json& j, HexBytes& v);
+}
+
 namespace nlohmann {
-
-// bytes
-template<>
-struct adl_serializer<bytes>
-{
-  static void to_json(json& j, const bytes& v) { j = to_hex(v); }
-
-  static void from_json(const json& j, bytes& v)
-  {
-    v = from_hex(j.get<std::string>());
-  }
-};
 
 // std::optional<T>
 template<typename T>
@@ -83,10 +82,13 @@ struct adl_serializer<mls::CipherSuite>
 template<typename T>
 struct tls_serializer
 {
-  static void to_json(json& j, const T& v) { j = tls::marshal(v); }
+  static void to_json(json& j, const T& v)
+  {
+    j = mls_vectors::HexBytes(tls::marshal(v));
+  }
   static void from_json(const json& j, T& v)
   {
-    v = tls::get<T>(j.get<bytes>());
+    v = tls::get<T>(j.get<mls_vectors::HexBytes>());
   }
 };
 
@@ -120,23 +122,23 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(TreeMathTestVector,
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EncryptionTestVector::SenderDataInfo,
                                    ciphertext,
                                    key,
-                                   nonce);
+                                   nonce)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EncryptionTestVector::RatchetStep,
                                    key,
                                    nonce,
                                    plaintext,
-                                   ciphertext);
+                                   ciphertext)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EncryptionTestVector::LeafInfo,
                                    generations,
                                    handshake,
-                                   application);
+                                   application)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EncryptionTestVector,
                                    cipher_suite,
                                    n_leaves,
                                    encryption_secret,
                                    sender_data_secret,
                                    sender_data_info,
-                                   leaves);
+                                   leaves)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(KeyScheduleTestVector::Epoch,
                                    tree_hash,
@@ -146,7 +148,6 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(KeyScheduleTestVector::Epoch,
                                    group_context,
                                    joiner_secret,
                                    welcome_secret,
-                                   epoch_secret,
                                    init_secret,
                                    sender_data_secret,
                                    encryption_secret,
@@ -181,10 +182,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(TreeKEMTestVector,
                                    cipher_suite,
                                    ratchet_tree_before,
                                    add_sender,
+                                   my_leaf_secret,
                                    my_key_package,
                                    my_path_secret,
                                    update_sender,
                                    update_path,
+                                   update_group_context,
                                    tree_hash_before,
                                    root_secret_after_add,
                                    root_secret_after_update,

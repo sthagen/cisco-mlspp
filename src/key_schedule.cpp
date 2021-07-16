@@ -68,11 +68,11 @@ std::tuple<uint32_t, KeyAndNonce>
 HashRatchet::next()
 {
   auto key = derive_tree_secret(
-    suite, next_secret, "app-key", node, next_generation, key_size);
+    suite, next_secret, "key", node, next_generation, key_size);
   auto nonce = derive_tree_secret(
-    suite, next_secret, "app-nonce", node, next_generation, nonce_size);
+    suite, next_secret, "nonce", node, next_generation, nonce_size);
   auto secret = derive_tree_secret(
-    suite, next_secret, "app-secret", node, next_generation, secret_size);
+    suite, next_secret, "secret", node, next_generation, secret_size);
 
   auto generation = next_generation;
 
@@ -163,7 +163,7 @@ SecretTree::get(LeafIndex sender)
     auto left = tree_math::left(curr_node);
     auto right = tree_math::right(curr_node, group_size);
 
-    auto& secret = secrets[node.val];
+    auto& secret = secrets[curr_node.val];
     secrets[left.val] =
       derive_tree_secret(suite, secret, "tree", left, 0, secret_size);
     secrets[right.val] =
@@ -569,7 +569,11 @@ KeyScheduleEpoch::sender_data_keys(CipherSuite suite,
   if (ciphertext.size() < sample_size) {
     sample = ciphertext;
   } else {
-    sample = bytes(ciphertext.begin(), ciphertext.begin() + sample_size);
+    sample = bytes(
+      ciphertext.begin(),
+      ciphertext.begin() +
+        sample_size); // NOLINT
+                      // (bugprone-narrowing-conversions,cppcoreguidelines-narrowing-conversions)
   }
 
   auto key_size = suite.hpke().aead.key_size;
@@ -616,7 +620,8 @@ TranscriptHash::update_confirmed(const MLSPlaintext& pt)
 void
 TranscriptHash::update_interim(const MAC& confirmation_tag)
 {
-  const auto transcript = confirmed + tls::marshal(confirmation_tag);
+  const auto opt_tag = std::optional<MAC>(confirmation_tag);
+  const auto transcript = confirmed + tls::marshal(opt_tag);
   interim = suite.digest().hash(transcript);
 }
 

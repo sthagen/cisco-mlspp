@@ -10,8 +10,9 @@ namespace mls {
 
 enum struct NodeType : uint8_t
 {
-  leaf = 0x00,
-  parent = 0x01,
+  reserved = 0x00,
+  leaf = 0x01,
+  parent = 0x02,
 };
 
 struct Node
@@ -108,7 +109,6 @@ struct TreeKEMPrivateKey
 
 private:
   void implant(NodeIndex start, LeafCount size, const bytes& path_secret);
-  bytes path_step(const bytes& path_secret) const;
 };
 
 struct TreeKEMPublicKey
@@ -177,9 +177,7 @@ private:
 
 namespace tls {
 
-using namespace mls;
-
-TLS_VARIANT_MAP(NodeType, KeyPackage, leaf)
-TLS_VARIANT_MAP(NodeType, ParentNode, parent)
+TLS_VARIANT_MAP(mls::NodeType, mls::KeyPackage, leaf)
+TLS_VARIANT_MAP(mls::NodeType, mls::ParentNode, parent)
 
 } // namespace tls

@@ -3,6 +3,7 @@
 #include <openssl/ec.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
@@ -27,6 +28,13 @@ void
 typed_delete(EVP_MD_CTX* ptr)
 {
   EVP_MD_CTX_free(ptr);
+}
+
+template<>
+void
+typed_delete(HMAC_CTX* ptr)
+{
+  HMAC_CTX_free(ptr);
 }
 
 template<>
@@ -68,6 +76,20 @@ template<>
 void typed_delete(STACK_OF(GENERAL_NAME) * ptr)
 {
   sk_GENERAL_NAME_pop_free(ptr, GENERAL_NAME_free);
+}
+
+template<>
+void
+typed_delete(BIO* ptr)
+{
+  BIO_vfree(ptr);
+}
+
+template<>
+void
+typed_delete(ASN1_TIME* ptr)
+{
+  ASN1_TIME_free(ptr);
 }
 
 ///

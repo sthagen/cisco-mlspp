@@ -60,9 +60,9 @@ X509Credential::X509Credential(const std::vector<bytes>& der_chain_in)
   }
 
   // first element represents leaf cert
-  const auto& sig = find_signature(parsed[0].public_key_algorithm);
+  const auto& sig = find_signature(parsed[0].public_key_algorithm());
   const auto pub_data = sig.serialize(*parsed[0].public_key);
-  _signature_scheme = tls_signature_scheme(parsed[0].public_key_algorithm);
+  _signature_scheme = tls_signature_scheme(parsed[0].public_key_algorithm());
   _public_key = SignaturePublicKey{ pub_data };
 
   // verify chain for valid signatures
@@ -136,10 +136,12 @@ Credential::valid_for(const SignaturePrivateKey& priv) const
 }
 
 Credential
-Credential::basic(const bytes& identity, const SignaturePublicKey& public_key)
+Credential::basic(const bytes& identity,
+                  CipherSuite suite,
+                  const SignaturePublicKey& public_key)
 {
   Credential cred;
-  cred._cred = BasicCredential{ identity, public_key };
+  cred._cred = BasicCredential{ identity, suite, public_key };
   return cred;
 }
 

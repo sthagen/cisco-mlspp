@@ -1,5 +1,43 @@
 #include "common.h"
+#include <set>
 #include <stdexcept>
+
+#include <doctest/doctest.h>
+#include <openssl/crypto.h>
+
+void
+ensure_fips_if_required()
+{
+  // NOLINTNEXTLINE (concurrency-mt-unsafe)
+  const auto* require = std::getenv("REQUIRE_FIPS");
+  if (require != nullptr && FIPS_mode() == 0) {
+    REQUIRE(FIPS_mode_set(1) == 1);
+  }
+}
+
+bool
+fips()
+{
+  return FIPS_mode() != 0;
+}
+
+bool
+fips_disable(AEAD::ID id)
+{
+  static const auto disabled = std::set<AEAD::ID>{
+    AEAD::ID::CHACHA20_POLY1305,
+  };
+  return disabled.count(id) > 0;
+}
+
+bool
+fips_disable(Signature::ID id)
+{
+  static const auto disabled = std::set<Signature::ID>{
+    Signature::ID::Ed448,
+  };
+  return disabled.count(id) > 0;
+}
 
 const Signature&
 select_signature(Signature::ID id)
@@ -22,6 +60,12 @@ select_signature(Signature::ID id)
 
     case Signature::ID::RSA_SHA256:
       return Signature::get<Signature::ID::RSA_SHA256>();
+
+    case Signature::ID::RSA_SHA384:
+      return Signature::get<Signature::ID::RSA_SHA384>();
+
+    case Signature::ID::RSA_SHA512:
+      return Signature::get<Signature::ID::RSA_SHA512>();
 
     default:
       throw std::runtime_error("Unknown algorithm");

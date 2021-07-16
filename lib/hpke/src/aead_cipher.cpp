@@ -5,6 +5,34 @@
 
 namespace hpke {
 
+///
+/// ExportOnlyCipher
+///
+bytes
+ExportOnlyCipher::seal(const bytes& /* key */,
+                       const bytes& /* nonce */,
+                       const bytes& /* aad */,
+                       const bytes& /* pt */) const
+{
+  throw std::runtime_error("seal() on export-only context");
+}
+
+std::optional<bytes>
+ExportOnlyCipher::open(const bytes& /* key */,
+                       const bytes& /* nonce */,
+                       const bytes& /* aad */,
+                       const bytes& /* ct */) const
+{
+  throw std::runtime_error("open() on export-only context");
+}
+
+ExportOnlyCipher::ExportOnlyCipher()
+  : AEAD(AEAD::ID::export_only, 0, 0)
+{}
+
+///
+/// AEADCipher
+///
 AEADCipher
 make_aead(AEAD::ID cipher_in)
 {
@@ -186,6 +214,7 @@ AEADCipher::open(const bytes& key,
   }
 
   auto inner_ct_size = ct.size() - tag_size;
+  // NOLINTNEXTLINE (cppcoreguidelines-narrowing-conversion)
   auto tag = bytes(ct.begin() + inner_ct_size, ct.end());
   if (1 != EVP_CIPHER_CTX_ctrl(ctx.get(),
                                EVP_CTRL_GCM_SET_TAG,

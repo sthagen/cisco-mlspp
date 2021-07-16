@@ -52,6 +52,12 @@ operator<<(std::ostream& str, const TreeKEMPublicKey& /* obj */)
   return str << "[TreeKEMPublicKey]";
 }
 
+bool
+operator==(const bytes& b, const HexBytes& hb)
+{
+  return b == hb.data;
+}
+
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define VERIFY(label, test)                                                    \
   if (!(test)) {                                                               \
@@ -70,9 +76,9 @@ operator<<(std::ostream& str, const TreeKEMPublicKey& /* obj */)
     return err;                                                                \
   }
 
-template<typename T>
+template<typename T, typename U>
 static std::optional<std::string>
-verify_equal(const std::string& label, const T& actual, const T& expected)
+verify_equal(const std::string& label, const T& actual, const U& expected)
 {
   if (actual == expected) {
     return std::nullopt;
@@ -87,7 +93,14 @@ template<typename T>
 static std::optional<std::string>
 verify_round_trip(const std::string& label, const bytes& expected)
 {
-  auto obj = tls::get<T>(expected);
+  auto obj = T{};
+  try {
+    obj = tls::get<T>(expected);
+  } catch (const std::exception& e) {
+    auto ss = std::stringstream();
+    ss << "Decode error: " << label << " " << e.what();
+    return ss.str();
+  }
   auto actual = tls::marshal(obj);
   VERIFY_EQUAL(label, actual, expected);
   return std::nullopt;
@@ -298,7 +311,6 @@ KeyScheduleTestVector::create(CipherSuite suite, uint32_t n_epochs)
   tv.initial_init_secret = epoch.init_secret;
 
   for (size_t i = 0; i < n_epochs; i++) {
-    group_context.epoch += 1;
     group_context.tree_hash = random_bytes(suite.digest().hash_size);
     group_context.confirmed_transcript_hash =
       random_bytes(suite.digest().hash_size);
@@ -322,7 +334,6 @@ KeyScheduleTestVector::create(CipherSuite suite, uint32_t n_epochs)
 
       epoch.joiner_secret,
       welcome_secret,
-      epoch.epoch_secret,
       epoch.init_secret,
 
       epoch.sender_data_secret,
@@ -336,6 +347,8 @@ KeyScheduleTestVector::create(CipherSuite suite, uint32_t n_epochs)
 
       epoch.external_priv.public_key,
     });
+
+    group_context.epoch += 1;
   }
 
   return tv;
@@ -352,17 +365,15 @@ KeyScheduleTestVector::verify() const
 
   for (const auto& tve : epochs) {
     // Ratchet forward the key schedule
-    group_context.epoch += 1;
     group_context.tree_hash = tve.tree_hash;
     group_context.confirmed_transcript_hash = tve.confirmed_transcript_hash;
     auto ctx = tls::marshal(group_context);
+    VERIFY_EQUAL("group context", ctx, tve.group_context);
 
     epoch = epoch.next(tve.commit_secret, tve.psk_secret, std::nullopt, ctx);
 
     // Verify the rest of the epoch
     VERIFY_EQUAL("joiner secret", epoch.joiner_secret, tve.joiner_secret);
-    VERIFY_EQUAL("epoch secret", epoch.epoch_secret, tve.epoch_secret);
-    VERIFY_EQUAL("init secret", epoch.init_secret, tve.init_secret);
 
     auto welcome_secret = KeyScheduleEpoch::welcome_secret(
       cipher_suite, tve.joiner_secret, tve.psk_secret);
@@ -382,9 +393,12 @@ KeyScheduleTestVector::verify() const
     VERIFY_EQUAL("membership key", epoch.membership_key, tve.membership_key);
     VERIFY_EQUAL(
       "resumption secret", epoch.resumption_secret, tve.resumption_secret);
+    VERIFY_EQUAL("init secret", epoch.init_secret, tve.init_secret);
 
     VERIFY_EQUAL(
       "external pub", epoch.external_priv.public_key, tve.external_pub);
+
+    group_context.epoch += 1;
   }
 
   return std::nullopt;
@@ -481,15 +495,17 @@ TranscriptTestVector::verify() const
 /// TreeKEMTestVector
 ///
 
-static std::tuple<SignaturePrivateKey, KeyPackage>
+static std::tuple<bytes, SignaturePrivateKey, KeyPackage>
 new_key_package(CipherSuite suite)
 {
-  auto init_priv = HPKEPrivateKey::generate(suite);
+  auto scheme = suite;
+  auto init_secret = random_bytes(suite.secret_size());
+  auto init_priv = HPKEPrivateKey::derive(suite, init_secret);
   auto sig_priv = SignaturePrivateKey::generate(suite);
-  auto cred = Credential::basic({ 0, 1, 2, 3 }, sig_priv.public_key);
+  auto cred = Credential::basic({ 0, 1, 2, 3 }, scheme, sig_priv.public_key);
   auto kp =
     KeyPackage{ suite, init_priv.public_key, cred, sig_priv, std::nullopt };
-  return { sig_priv, kp };
+  return { init_secret, sig_priv, kp };
 }
 
 TreeKEMTestVector
@@ -513,7 +529,8 @@ TreeKEMTestVector::create(CipherSuite suite, size_t n_leaves)
   auto sig_privs = std::vector<SignaturePrivateKey>{};
   auto pub = TreeKEMPublicKey{ suite };
   for (size_t i = 0; i < n_leaves; i++) {
-    auto [sig_priv, key_package] = new_key_package(suite);
+    auto [init_secret, sig_priv, key_package] = new_key_package(suite);
+    silence_unused(init_secret);
     sig_privs.push_back(sig_priv);
 
     auto leaf_secret = random_bytes(suite.secret_size());
@@ -530,7 +547,7 @@ TreeKEMTestVector::create(CipherSuite suite, size_t n_leaves)
 
   // Add the test participant
   auto add_secret = random_bytes(suite.secret_size());
-  auto [test_sig_priv, test_kp] = new_key_package(suite);
+  auto [test_init_secret, test_sig_priv, test_kp] = new_key_package(suite);
   auto test_index = pub.add_leaf(test_kp);
   auto [add_priv, add_path] = pub.encap(tv.add_sender,
                                         {},
@@ -548,14 +565,16 @@ TreeKEMTestVector::create(CipherSuite suite, size_t n_leaves)
 
   tv.ratchet_tree_before = pub;
   tv.tree_hash_before = pub.root_hash();
+  tv.my_leaf_secret = test_init_secret;
   tv.my_key_package = test_kp;
   tv.my_path_secret = path_secret;
   tv.root_secret_after_add = add_priv.update_secret;
 
   // Do a second update that the test participant should be able to process
   auto update_secret = random_bytes(suite.secret_size());
+  auto update_context = random_bytes(suite.secret_size());
   auto [update_priv, update_path] = pub.encap(tv.update_sender,
-                                              {},
+                                              update_context,
                                               update_secret,
                                               sig_privs[tv.update_sender.val],
                                               {},
@@ -564,6 +583,7 @@ TreeKEMTestVector::create(CipherSuite suite, size_t n_leaves)
   pub.set_hash_all();
 
   tv.update_path = update_path;
+  tv.update_group_context = update_context;
   tv.root_secret_after_update = update_priv.update_secret;
   tv.ratchet_tree_after = pub;
   tv.tree_hash_after = { pub.root_hash() };
@@ -608,18 +628,19 @@ TreeKEMTestVector::verify() const
   auto ancestor = tree_math::ancestor(my_index, add_sender);
 
   // Establish a TreeKEMPrivate Key
-  auto dummy_leaf_priv = HPKEPrivateKey::generate(cipher_suite);
+  auto leaf_priv = HPKEPrivateKey::derive(cipher_suite, my_leaf_secret);
   auto priv = TreeKEMPrivateKey::joiner(cipher_suite,
                                         ratchet_tree_before.size(),
                                         my_index,
-                                        dummy_leaf_priv,
+                                        leaf_priv,
                                         ancestor,
                                         my_path_secret);
   VERIFY_EQUAL(
     "root secret after add", priv.update_secret, root_secret_after_add);
 
   // Process the UpdatePath
-  priv.decap(update_sender, ratchet_tree_before, {}, update_path, {});
+  priv.decap(
+    update_sender, ratchet_tree_before, update_group_context, update_path, {});
 
   auto my_tree_after = ratchet_tree_before;
   my_tree_after.merge(update_sender, update_path);
@@ -655,8 +676,10 @@ MessagesTestVector::create()
   auto hpke_ct = HPKECiphertext{ opaque, opaque };
   auto sig_priv = SignaturePrivateKey::generate(suite);
 
+  auto psk_nonce = random_bytes(suite.secret_size());
+
   // KeyPackage and extensions
-  auto cred = Credential::basic(user_id, sig_priv.public_key);
+  auto cred = Credential::basic(user_id, suite, sig_priv.public_key);
   auto key_package =
     KeyPackage{ suite, hpke_pub, cred, sig_priv, std::nullopt };
 
@@ -674,8 +697,8 @@ MessagesTestVector::create()
   auto group_secrets = GroupSecrets{ opaque,
                                      { { opaque } },
                                      PreSharedKeys{ {
-                                       { psk_id },
-                                       { psk_id },
+                                       { psk_id, psk_nonce },
+                                       { psk_id, psk_nonce },
                                      } } };
   auto welcome = Welcome{ suite, opaque, opaque, group_info };
   welcome.encrypt(key_package, opaque);
@@ -689,7 +712,7 @@ MessagesTestVector::create()
   auto add = Add{ key_package };
   auto update = Update{ key_package };
   auto remove = Remove{ index };
-  auto pre_shared_key = PreSharedKey{ psk_id };
+  auto pre_shared_key = PreSharedKey{ psk_id, psk_nonce };
   auto reinit = ReInit{ group_id, version, suite, {} };
   auto external_init = ExternalInit{ opaque };
   auto app_ack = AppAck{ { { index.val, 0, 5 }, { index.val, 7, 10 } } };

@@ -38,11 +38,26 @@ class MLSClientImpl final : public MLSClient::Service
   Status JoinGroup(ServerContext* context,
                    const JoinGroupRequest* request,
                    JoinGroupResponse* response) override;
+  Status ExternalJoin(ServerContext* context,
+                      const ExternalJoinRequest* request,
+                      ExternalJoinResponse* response) override;
 
   // Access information from a group state
+  Status PublicGroupState(ServerContext* context,
+                          const PublicGroupStateRequest* request,
+                          PublicGroupStateResponse* response) override;
   Status StateAuth(ServerContext* context,
                    const StateAuthRequest* request,
                    StateAuthResponse* response) override;
+  Status Export(ServerContext* context,
+                const ExportRequest* request,
+                ExportResponse* response) override;
+  Status Protect(ServerContext* context,
+                 const ProtectRequest* request,
+                 ProtectResponse* response) override;
+  Status Unprotect(ServerContext* context,
+                   const UnprotectRequest* request,
+                   UnprotectResponse* response) override;
 
   // Operations using a group state
   Status AddProposal(ServerContext* context,
@@ -54,6 +69,9 @@ class MLSClientImpl final : public MLSClient::Service
   Status HandleCommit(ServerContext* context,
                       const HandleCommitRequest* request,
                       HandleCommitResponse* response) override;
+  Status HandleExternalCommit(ServerContext* context,
+                              const HandleExternalCommitRequest* request,
+                              HandleExternalCommitResponse* response) override;
 
 private:
   // Wrapper for methods that rely on state
@@ -108,11 +126,25 @@ private:
                             CreateKeyPackageResponse* response);
   Status join_group(const JoinGroupRequest* request,
                     JoinGroupResponse* response);
+  Status external_join(const ExternalJoinRequest* request,
+                       ExternalJoinResponse* response);
 
   // Access information from a group state
+  Status public_group_state(CachedState& entry,
+                            const PublicGroupStateRequest* request,
+                            PublicGroupStateResponse* response);
   Status state_auth(CachedState& entry,
                     const StateAuthRequest* request,
                     StateAuthResponse* response);
+  Status do_export(CachedState& entry,
+                   const ExportRequest* request,
+                   ExportResponse* response);
+  Status protect(CachedState& entry,
+                 const ProtectRequest* request,
+                 ProtectResponse* response);
+  Status unprotect(CachedState& entry,
+                   const UnprotectRequest* request,
+                   UnprotectResponse* response);
 
   // Operations on a running group
   Status add_proposal(CachedState& entry,
@@ -124,4 +156,7 @@ private:
   Status handle_commit(CachedState& entry,
                        const HandleCommitRequest* request,
                        HandleCommitResponse* response);
+  Status handle_external_commit(CachedState& entry,
+                                const HandleExternalCommitRequest* request,
+                                HandleExternalCommitResponse* response);
 };

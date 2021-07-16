@@ -83,8 +83,9 @@ struct BranchPSK
 struct PreSharedKeyID
 {
   var::variant<ExternalPSK, ReInitPSK, BranchPSK> content;
-  TLS_SERIALIZABLE(content)
-  TLS_TRAITS(tls::variant<PSKType>)
+  bytes psk_nonce;
+  TLS_SERIALIZABLE(content, psk_nonce)
+  TLS_TRAITS(tls::variant<PSKType>, tls::vector<1>)
 };
 
 struct PreSharedKeys
@@ -227,8 +228,8 @@ struct GroupSecrets
   std::optional<PathSecret> path_secret;
   std::optional<PreSharedKeys> psks;
 
-  TLS_SERIALIZABLE(joiner_secret, path_secret)
-  TLS_TRAITS(tls::vector<1>, tls::pass)
+  TLS_SERIALIZABLE(joiner_secret, path_secret, psks)
+  TLS_TRAITS(tls::vector<1>, tls::pass, tls::pass)
 };
 
 // struct {
@@ -528,8 +529,9 @@ private:
 
 // struct {
 //     opaque group_id<0..255>;
-//     uint32 epoch;
+//     uint64 epoch;
 //     ContentType content_type;
+//     opaque authenticated_data<0..2^32-1>;
 //     opaque encrypted_sender_data<0..255>;
 //     opaque ciphertext<0..2^32-1>;
 // } MLSCiphertext;
@@ -538,21 +540,21 @@ struct MLSCiphertext
   bytes group_id;
   epoch_t epoch;
   ContentType content_type;
-  bytes encrypted_sender_data;
   bytes authenticated_data;
+  bytes encrypted_sender_data;
   bytes ciphertext;
 
   TLS_SERIALIZABLE(group_id,
                    epoch,
                    content_type,
-                   encrypted_sender_data,
                    authenticated_data,
+                   encrypted_sender_data,
                    ciphertext)
   TLS_TRAITS(tls::vector<1>,
              tls::pass,
              tls::pass,
-             tls::vector<1>,
              tls::vector<4>,
+             tls::vector<1>,
              tls::vector<4>)
 };
 
@@ -560,25 +562,23 @@ struct MLSCiphertext
 
 namespace tls {
 
-using namespace mls;
+TLS_VARIANT_MAP(mls::PSKType, mls::ExternalPSK, external)
+TLS_VARIANT_MAP(mls::PSKType, mls::ReInitPSK, reinit)
+TLS_VARIANT_MAP(mls::PSKType, mls::BranchPSK, branch)
 
-TLS_VARIANT_MAP(PSKType, ExternalPSK, external)
-TLS_VARIANT_MAP(PSKType, ReInitPSK, reinit)
-TLS_VARIANT_MAP(PSKType, BranchPSK, branch)
+TLS_VARIANT_MAP(mls::ProposalOrRefType, mls::Proposal, value)
+TLS_VARIANT_MAP(mls::ProposalOrRefType, mls::ProposalRef, reference)
 
-TLS_VARIANT_MAP(ProposalOrRefType, Proposal, value)
-TLS_VARIANT_MAP(ProposalOrRefType, ProposalRef, reference)
+TLS_VARIANT_MAP(mls::ProposalType, mls::Add, add)
+TLS_VARIANT_MAP(mls::ProposalType, mls::Update, update)
+TLS_VARIANT_MAP(mls::ProposalType, mls::Remove, remove)
+TLS_VARIANT_MAP(mls::ProposalType, mls::PreSharedKey, psk)
+TLS_VARIANT_MAP(mls::ProposalType, mls::ReInit, reinit)
+TLS_VARIANT_MAP(mls::ProposalType, mls::ExternalInit, external_init)
+TLS_VARIANT_MAP(mls::ProposalType, mls::AppAck, app_ack)
 
-TLS_VARIANT_MAP(ProposalType, Add, add)
-TLS_VARIANT_MAP(ProposalType, Update, update)
-TLS_VARIANT_MAP(ProposalType, Remove, remove)
-TLS_VARIANT_MAP(ProposalType, PreSharedKey, psk)
-TLS_VARIANT_MAP(ProposalType, ReInit, reinit)
-TLS_VARIANT_MAP(ProposalType, ExternalInit, external_init)
-TLS_VARIANT_MAP(ProposalType, AppAck, app_ack)
-
-TLS_VARIANT_MAP(ContentType, ApplicationData, application)
-TLS_VARIANT_MAP(ContentType, Proposal, proposal)
-TLS_VARIANT_MAP(ContentType, Commit, commit)
+TLS_VARIANT_MAP(mls::ContentType, mls::ApplicationData, application)
+TLS_VARIANT_MAP(mls::ContentType, mls::Proposal, proposal)
+TLS_VARIANT_MAP(mls::ContentType, mls::Commit, commit)
 
 } // namespace tls

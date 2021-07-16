@@ -6,6 +6,8 @@
 #include <vector>
 TEST_CASE("Signature Known-Answer")
 {
+  ensure_fips_if_required();
+
   struct KnownAnswerTest
   {
     Signature::ID id;
@@ -63,6 +65,10 @@ TEST_CASE("Signature Known-Answer")
   };
 
   for (const auto& tc : cases) {
+    if (fips() && fips_disable(tc.id)) {
+      continue;
+    }
+
     const auto& sig = select_signature(tc.id);
 
     auto priv = sig.deserialize_private(tc.priv_serialized);
@@ -81,19 +87,28 @@ TEST_CASE("Signature Known-Answer")
 
 TEST_CASE("Signature Round-Trip")
 {
+  ensure_fips_if_required();
+
   const std::vector<Signature::ID> ids{
     Signature::ID::P256_SHA256, Signature::ID::P384_SHA384,
     Signature::ID::P521_SHA512, Signature::ID::Ed25519,
     Signature::ID::Ed448,       Signature::ID::RSA_SHA256,
+    Signature::ID::RSA_SHA384,  Signature::ID::RSA_SHA512,
   };
 
   const auto data = from_hex("00010203");
 
   for (const auto& id : ids) {
+    if (fips() && fips_disable(id)) {
+      continue;
+    }
+
     const auto& sig = select_signature(id);
 
     auto priv = std::unique_ptr<Signature::PrivateKey>(nullptr);
-    if (id == Signature::ID::RSA_SHA256) {
+    if ((id == Signature::ID::RSA_SHA256) ||
+        (id == Signature::ID::RSA_SHA384) ||
+        (id == Signature::ID::RSA_SHA512)) {
       priv = Signature::generate_rsa(2048);
     } else {
       priv = sig.generate_key_pair();
