@@ -33,6 +33,15 @@ struct KeyAndNonce
   bytes nonce;
 };
 
+// opaque HashReference[16];
+// HashReference KeyPackageRef;
+// HashReference LeafNodeRef;
+// HashReference ProposalRef;
+using HashReference = std::array<uint8_t, 16>;
+using KeyPackageRef = HashReference;
+using LeafNodeRef = HashReference;
+using ProposalRef = HashReference;
+
 struct CipherSuite
 {
   enum struct ID : uint16_t
@@ -67,6 +76,18 @@ struct CipherSuite
                           size_t length) const;
   bytes derive_secret(const bytes& secret, const std::string& label) const;
 
+  template<typename T>
+  HashReference ref(const T& val) const
+  {
+    auto ref = HashReference{};
+    auto marshaled = tls::marshal(val);
+    auto extracted = hpke().kdf.extract({}, marshaled);
+    auto expanded =
+      hpke().kdf.expand(extracted, reference_label<T>(), ref.size());
+    std::copy(expanded.begin(), expanded.end(), ref.begin());
+    return ref;
+  }
+
   TLS_SERIALIZABLE(id)
 
 private:
@@ -80,6 +101,9 @@ private:
   };
 
   const Ciphers& get() const;
+
+  template<typename T>
+  static const bytes& reference_label();
 };
 
 extern const std::array<CipherSuite::ID, 6> all_supported_suites;
@@ -97,7 +121,6 @@ struct HPKECiphertext
   bytes ciphertext;
 
   TLS_SERIALIZABLE(kem_output, ciphertext)
-  TLS_TRAITS(tls::vector<2>, tls::vector<2>)
 };
 
 struct HPKEPublicKey
@@ -105,15 +128,16 @@ struct HPKEPublicKey
   bytes data;
 
   HPKECiphertext encrypt(CipherSuite suite,
+                         const bytes& info,
                          const bytes& aad,
                          const bytes& pt) const;
 
   std::tuple<bytes, bytes> do_export(CipherSuite suite,
+                                     const bytes& info,
                                      const std::string& label,
                                      size_t size) const;
 
   TLS_SERIALIZABLE(data)
-  TLS_TRAITS(tls::vector<2>)
 };
 
 struct HPKEPrivateKey
@@ -128,16 +152,17 @@ struct HPKEPrivateKey
   HPKEPublicKey public_key;
 
   bytes decrypt(CipherSuite suite,
+                const bytes& info,
                 const bytes& aad,
                 const HPKECiphertext& ct) const;
 
   bytes do_export(CipherSuite suite,
+                  const bytes& info,
                   const bytes& kem_output,
                   const std::string& label,
                   size_t size) const;
 
   TLS_SERIALIZABLE(data, public_key)
-  TLS_TRAITS(tls::vector<2>, tls::pass)
 
 private:
   HPKEPrivateKey(bytes priv_data, bytes pub_data);
@@ -153,7 +178,6 @@ struct SignaturePublicKey
               const bytes& signature) const;
 
   TLS_SERIALIZABLE(data)
-  TLS_TRAITS(tls::vector<2>)
 };
 
 struct SignaturePrivateKey
@@ -168,7 +192,6 @@ struct SignaturePrivateKey
   bytes sign(const CipherSuite& suite, const bytes& message) const;
 
   TLS_SERIALIZABLE(data, public_key)
-  TLS_TRAITS(tls::vector<2>, tls::pass)
 
 private:
   SignaturePrivateKey(bytes priv_data, bytes pub_data);

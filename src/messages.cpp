@@ -21,51 +21,53 @@ SFrameCapabilities::compatible(const SFrameParameters& params) const
 
 // PublicGroupState
 
+static const auto zero_ref =
+  LeafNodeRef{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
 PublicGroupState::PublicGroupState(CipherSuite cipher_suite_in,
                                    bytes group_id_in,
                                    epoch_t epoch_in,
                                    bytes tree_hash_in,
                                    bytes interim_transcript_hash_in,
-                                   ExtensionList extensions_in,
+                                   ExtensionList group_context_extensions_in,
+                                   ExtensionList other_extensions_in,
                                    HPKEPublicKey external_pub_in)
   : cipher_suite(cipher_suite_in)
   , group_id(std::move(group_id_in))
   , epoch(epoch_in)
   , tree_hash(std::move(tree_hash_in))
   , interim_transcript_hash(std::move(interim_transcript_hash_in))
-  , extensions(std::move(extensions_in))
+  , group_context_extensions(std::move(group_context_extensions_in))
+  , other_extensions(std::move(other_extensions_in))
   , external_pub(std::move(external_pub_in))
+  , signer(zero_ref)
 {}
 
 bytes
 PublicGroupState::to_be_signed() const
 {
   tls::ostream w;
-  w << cipher_suite;
-  tls::vector<1>::encode(w, group_id);
-  w << epoch;
-  tls::vector<1>::encode(w, tree_hash);
-  tls::vector<1>::encode(w, interim_transcript_hash);
-  w << extensions << external_pub << signer_index;
+  w << cipher_suite << group_id << epoch << tree_hash << interim_transcript_hash
+    << group_context_extensions << other_extensions << external_pub << signer;
   return w.bytes();
 }
 
 void
 PublicGroupState::sign(const TreeKEMPublicKey& tree,
-                       LeafIndex index,
+                       LeafNodeRef signer_ref,
                        const SignaturePrivateKey& priv)
 {
-  auto maybe_kp = tree.key_package(index);
-  if (!maybe_kp) {
+  auto maybe_leaf = tree.leaf_node(signer_ref);
+  if (!maybe_leaf) {
     throw InvalidParameterError("Cannot sign from a blank leaf");
   }
 
-  auto cred = opt::get(maybe_kp).credential;
+  auto cred = opt::get(maybe_leaf).credential;
   if (cred.public_key() != priv.public_key) {
     throw InvalidParameterError("Bad key for index");
   }
 
-  signer_index = index;
+  signer = signer_ref;
   signature = priv.sign(tree.suite, to_be_signed());
 }
 
@@ -76,12 +78,12 @@ PublicGroupState::verify(const TreeKEMPublicKey& tree) const
     throw InvalidParameterError("Cipher suite mismatch");
   }
 
-  auto maybe_kp = tree.key_package(signer_index);
-  if (!maybe_kp) {
+  auto maybe_leaf = tree.leaf_node(signer);
+  if (!maybe_leaf) {
     throw InvalidParameterError("Cannot sign from a blank leaf");
   }
 
-  auto cred = opt::get(maybe_kp).credential;
+  auto cred = opt::get(maybe_leaf).credential;
   return cred.public_key().verify(cipher_suite, to_be_signed(), signature);
 }
 
@@ -91,56 +93,57 @@ GroupInfo::GroupInfo(bytes group_id_in,
                      epoch_t epoch_in,
                      bytes tree_hash_in,
                      bytes confirmed_transcript_hash_in,
-                     ExtensionList extensions_in,
+                     ExtensionList group_context_extensions_in,
+                     ExtensionList other_extensions_in,
                      MAC confirmation_tag_in)
   : group_id(std::move(group_id_in))
   , epoch(epoch_in)
   , tree_hash(std::move(tree_hash_in))
   , confirmed_transcript_hash(std::move(confirmed_transcript_hash_in))
-  , extensions(std::move(extensions_in))
+  , group_context_extensions(std::move(group_context_extensions_in))
+  , other_extensions(std::move(other_extensions_in))
   , confirmation_tag(std::move(confirmation_tag_in))
+  , signer(zero_ref)
 {}
 
 bytes
 GroupInfo::to_be_signed() const
 {
   tls::ostream w;
-  tls::vector<1>::encode(w, group_id);
-  w << epoch;
-  tls::vector<1>::encode(w, tree_hash);
-  tls::vector<1>::encode(w, confirmed_transcript_hash);
-  w << confirmation_tag << signer_index;
+  w << group_id << epoch << tree_hash << confirmed_transcript_hash
+    << group_context_extensions << other_extensions << confirmation_tag
+    << signer;
   return w.bytes();
 }
 
 void
 GroupInfo::sign(const TreeKEMPublicKey& tree,
-                LeafIndex index,
+                LeafNodeRef signer_ref,
                 const SignaturePrivateKey& priv)
 {
-  auto maybe_kp = tree.key_package(index);
-  if (!maybe_kp) {
+  auto maybe_leaf = tree.leaf_node(signer_ref);
+  if (!maybe_leaf) {
     throw InvalidParameterError("Cannot sign from a blank leaf");
   }
 
-  auto cred = opt::get(maybe_kp).credential;
+  auto cred = opt::get(maybe_leaf).credential;
   if (cred.public_key() != priv.public_key) {
     throw InvalidParameterError("Bad key for index");
   }
 
-  signer_index = index;
+  signer = signer_ref;
   signature = priv.sign(tree.suite, to_be_signed());
 }
 
 bool
 GroupInfo::verify(const TreeKEMPublicKey& tree) const
 {
-  auto maybe_kp = tree.key_package(signer_index);
-  if (!maybe_kp) {
+  auto maybe_leaf = tree.leaf_node(signer);
+  if (!maybe_leaf) {
     throw InvalidParameterError("Cannot sign from a blank leaf");
   }
 
-  auto cred = opt::get(maybe_kp).credential;
+  auto cred = opt::get(maybe_leaf).credential;
   return cred.public_key().verify(tree.suite, to_be_signed(), signature);
 }
 
@@ -153,13 +156,13 @@ Welcome::Welcome()
 
 Welcome::Welcome(CipherSuite suite,
                  const bytes& joiner_secret,
-                 const bytes& psk_secret,
+                 const std::vector<PSKWithSecret>& psks,
                  const GroupInfo& group_info)
   : version(ProtocolVersion::mls10)
   , cipher_suite(suite)
   , _joiner_secret(joiner_secret)
 {
-  auto [key, nonce] = group_info_key_nonce(suite, joiner_secret, psk_secret);
+  auto [key, nonce] = group_info_key_nonce(suite, joiner_secret, psks);
   auto group_info_data = tls::marshal(group_info);
   encrypted_group_info =
     cipher_suite.hpke().aead.seal(key, nonce, {}, group_info_data);
@@ -168,9 +171,9 @@ Welcome::Welcome(CipherSuite suite,
 std::optional<int>
 Welcome::find(const KeyPackage& kp) const
 {
-  auto hash = kp.hash();
+  auto ref = kp.ref();
   for (size_t i = 0; i < secrets.size(); i++) {
-    if (hash == secrets[i].key_package_hash) {
+    if (ref == secrets[i].new_member) {
       return static_cast<int>(i);
     }
   }
@@ -180,21 +183,21 @@ Welcome::find(const KeyPackage& kp) const
 void
 Welcome::encrypt(const KeyPackage& kp, const std::optional<bytes>& path_secret)
 {
-  auto gs = GroupSecrets{ _joiner_secret, std::nullopt, std::nullopt };
+  auto gs = GroupSecrets{ _joiner_secret, std::nullopt, {} };
   if (path_secret) {
     gs.path_secret = { opt::get(path_secret) };
   }
 
   auto gs_data = tls::marshal(gs);
-  auto enc_gs = kp.init_key.encrypt(kp.cipher_suite, {}, gs_data);
-  secrets.push_back({ kp.hash(), enc_gs });
+  auto enc_gs = kp.init_key.encrypt(kp.cipher_suite, {}, {}, gs_data);
+  secrets.push_back({ kp.ref(), enc_gs });
 }
 
 GroupInfo
-Welcome::decrypt(const bytes& joiner_secret, const bytes& psk_secret) const
+Welcome::decrypt(const bytes& joiner_secret,
+                 const std::vector<PSKWithSecret>& psks) const
 {
-  auto [key, nonce] =
-    group_info_key_nonce(cipher_suite, joiner_secret, psk_secret);
+  auto [key, nonce] = group_info_key_nonce(cipher_suite, joiner_secret, psks);
   auto group_info_data =
     cipher_suite.hpke().aead.open(key, nonce, {}, encrypted_group_info);
   if (!group_info_data) {
@@ -207,27 +210,98 @@ Welcome::decrypt(const bytes& joiner_secret, const bytes& psk_secret) const
 KeyAndNonce
 Welcome::group_info_key_nonce(CipherSuite suite,
                               const bytes& joiner_secret,
-                              const bytes& psk_secret)
+                              const std::vector<PSKWithSecret>& psks)
 {
+  static const auto key_label = from_ascii("key");
+  static const auto nonce_label = from_ascii("nonce");
+
   auto welcome_secret =
-    KeyScheduleEpoch::welcome_secret(suite, joiner_secret, psk_secret);
+    KeyScheduleEpoch::welcome_secret(suite, joiner_secret, psks);
+
+  // XXX(RLB): These used to be done with ExpandWithLabel.  Should we do that
+  // instead, for better domain separation? (In particular, including "mls10")
+  // That is what we do for the sender data key/nonce.
   auto key =
-    suite.expand_with_label(welcome_secret, "key", {}, suite.key_size());
+    suite.hpke().kdf.expand(welcome_secret, key_label, suite.key_size());
   auto nonce =
-    suite.expand_with_label(welcome_secret, "nonce", {}, suite.nonce_size());
+    suite.hpke().kdf.expand(welcome_secret, nonce_label, suite.nonce_size());
   return { std::move(key), std::move(nonce) };
 }
 
+// Commit
+
+template<typename P>
+std::vector<std::reference_wrapper<const P>>
+filter_inline(const std::vector<ProposalOrRef>& prop_or_refs)
+{
+  auto selected = std::vector<std::reference_wrapper<const P>>{};
+  for (const auto& prop_or_ref : prop_or_refs) {
+    const auto* by_value = var::get_if<Proposal>(&prop_or_ref.content);
+    if (!by_value) {
+      continue;
+    }
+
+    const auto* correct_type = var::get_if<P>(&by_value->content);
+    if (!correct_type) {
+      continue;
+    }
+
+    selected.push_back(*correct_type);
+  }
+
+  return selected;
+}
+
+std::optional<bytes>
+Commit::valid_external() const
+{
+  // There MUST be a single Add proposal
+  if (filter_inline<Add>(proposals).size() != 1) {
+    return std::nullopt;
+  }
+
+  // There MUST NOT be any Update proposals
+  if (!filter_inline<Update>(proposals).empty()) {
+    return std::nullopt;
+  }
+
+  // If a Remove proposal is present, then the `credential` and `endpoint_id` of
+  // the removed leaf MUST be the same as the corresponding values in the Add
+  // KeyPackage.
+  auto removes = filter_inline<Remove>(proposals);
+  if (removes.size() > 1) {
+    return std::nullopt;
+  }
+
+  if (removes.size() == 1) {
+    // TODO(RLB) Implement identity match once endpoint_id is implemented
+  }
+
+  // There MUST be a single ExternalInit proposal
+  auto ext_inits = filter_inline<ExternalInit>(proposals);
+  if (ext_inits.size() != 1) {
+    return std::nullopt;
+  }
+
+  return ext_inits[0].get().kem_output;
+}
+
 // MLSPlaintext
-ProposalType
+Proposal::Type
 Proposal::proposal_type() const
 {
-  return tls::variant<ProposalType>::type(content);
+  return tls::variant<ProposalType>::type(content).val;
+}
+
+SenderType
+Sender::sender_type() const
+{
+  return tls::variant<SenderType>::type(sender);
 }
 
 MLSPlaintext::MLSPlaintext()
-  : epoch(0)
-  , decrypted(false)
+  : wire_format(WireFormat::mls_plaintext)
+  , epoch(0)
 {}
 
 MLSPlaintext::MLSPlaintext(bytes group_id_in,
@@ -236,12 +310,12 @@ MLSPlaintext::MLSPlaintext(bytes group_id_in,
                            ContentType content_type_in,
                            bytes authenticated_data_in,
                            const bytes& content_in)
-  : group_id(std::move(group_id_in))
+  : wire_format(WireFormat::mls_ciphertext) // since this is used for decryption
+  , group_id(std::move(group_id_in))
   , epoch(epoch_in)
-  , sender(sender_in)
+  , sender(std::move(sender_in))
   , authenticated_data(std::move(authenticated_data_in))
   , content(ApplicationData())
-  , decrypted(true)
 {
   tls::istream r(content_in);
   switch (content_type_in) {
@@ -268,42 +342,40 @@ MLSPlaintext::MLSPlaintext(bytes group_id_in,
   }
 
   bytes padding;
-  tls::vector<2>::decode(r, signature);
-  r >> confirmation_tag;
-  tls::vector<2>::decode(r, padding);
+  r >> signature >> confirmation_tag >> padding;
 }
 
 MLSPlaintext::MLSPlaintext(bytes group_id_in,
                            epoch_t epoch_in,
                            Sender sender_in,
                            ApplicationData application_data_in)
-  : group_id(std::move(group_id_in))
+  : wire_format(WireFormat::mls_plaintext)
+  , group_id(std::move(group_id_in))
   , epoch(epoch_in)
-  , sender(sender_in)
+  , sender(std::move(sender_in))
   , content(std::move(application_data_in))
-  , decrypted(false)
 {}
 
 MLSPlaintext::MLSPlaintext(bytes group_id_in,
                            epoch_t epoch_in,
                            Sender sender_in,
                            Proposal proposal)
-  : group_id(std::move(group_id_in))
+  : wire_format(WireFormat::mls_plaintext)
+  , group_id(std::move(group_id_in))
   , epoch(epoch_in)
-  , sender(sender_in)
+  , sender(std::move(sender_in))
   , content(std::move(proposal))
-  , decrypted(false)
 {}
 
 MLSPlaintext::MLSPlaintext(bytes group_id_in,
                            epoch_t epoch_in,
                            Sender sender_in,
                            Commit commit)
-  : group_id(std::move(group_id_in))
+  : wire_format(WireFormat::mls_plaintext)
+  , group_id(std::move(group_id_in))
   , epoch(epoch_in)
-  , sender(sender_in)
+  , sender(std::move(sender_in))
   , content(std::move(commit))
-  , decrypted(false)
 {}
 
 ContentType
@@ -323,10 +395,7 @@ MLSPlaintext::marshal_content(size_t padding_size) const
   tls::ostream w;
   var::visit([&](auto&& inner_content) { w << inner_content; }, content);
 
-  bytes padding(padding_size, 0);
-  tls::vector<2>::encode(w, signature);
-  w << confirmation_tag;
-  tls::vector<2>::encode(w, padding);
+  w << signature << confirmation_tag << bytes(padding_size, 0);
   return w.bytes();
 }
 
@@ -334,23 +403,15 @@ bytes
 MLSPlaintext::commit_content() const
 {
   tls::ostream w;
-  tls::vector<1>::encode(w, group_id);
-  w << epoch << sender;
-  tls::vector<4>::encode(w, authenticated_data);
+  w << wire_format << group_id << epoch << sender << authenticated_data;
   tls::variant<ContentType>::encode(w, content);
-  tls::vector<2>::encode(w, signature);
+  w << signature;
   return w.bytes();
 }
 
 bytes
 MLSPlaintext::commit_auth_data() const
 {
-  // XXX(RLB): This construction means that the hashed transcript differs from
-  // the wire transcript by one byte -- the optional indicator on the
-  // confirmation tag is missing.  It's always 0x01, so it shouldn't matter, but
-  // it might be clearer to fix this.
-  //
-  // XXX(RLB): This matches PR#466, not the current spec.
   return tls::marshal(confirmation_tag);
 }
 
@@ -358,10 +419,8 @@ bytes
 MLSPlaintext::to_be_signed(const GroupContext& context) const
 {
   tls::ostream w;
-  w << context;
-  tls::vector<1>::encode(w, group_id);
-  w << epoch << sender;
-  tls::vector<4>::encode(w, authenticated_data);
+  w << context << wire_format << group_id << epoch << sender
+    << authenticated_data;
   tls::variant<ContentType>::encode(w, content);
   return w.bytes();
 }
@@ -388,15 +447,14 @@ bytes
 MLSPlaintext::membership_tag_input(const GroupContext& context) const
 {
   tls::ostream w;
-  tls::vector<2>::encode(w, signature);
-  w << confirmation_tag;
+  w << signature << confirmation_tag;
   return to_be_signed(context) + w.bytes();
 }
 
 bool
 MLSPlaintext::verify_membership_tag(const bytes& tag) const
 {
-  if (decrypted) {
+  if (wire_format == WireFormat::mls_ciphertext) {
     return true;
   }
 

@@ -1,8 +1,10 @@
 #include "mls_client_impl.h"
 #include "json_details.h"
+#include <bytes/bytes.h>
 
 using grpc::StatusCode;
 using nlohmann::json;
+using namespace bytes_ns;
 
 static inline std::string
 bytes_to_string(const std::vector<uint8_t>& data)
@@ -212,12 +214,19 @@ MLSClientImpl::HandleExternalCommit(ServerContext* /* context */,
 // Cached join transactions
 uint32_t
 MLSClientImpl::store_join(mls::HPKEPrivateKey&& init_priv,
+                          mls::HPKEPrivateKey&& leaf_priv,
                           mls::SignaturePrivateKey&& sig_priv,
                           mls::KeyPackage&& kp)
 {
-  auto join_id = tls::get<uint32_t>(kp.hash());
-  auto entry =
-    CachedJoin{ std::move(init_priv), std::move(sig_priv), std::move(kp) };
+  auto ref = kp.ref();
+  auto ref_data = bytes(ref.size());
+  std::copy(ref.begin(), ref.end(), ref_data.begin());
+
+  auto join_id = tls::get<uint32_t>(ref_data);
+  auto entry = CachedJoin{ std::move(init_priv),
+                           std::move(leaf_priv),
+                           std::move(sig_priv),
+                           std::move(kp) };
   join_cache.emplace(std::make_pair(join_id, std::move(entry)));
   return join_id;
 }
@@ -265,6 +274,8 @@ uint32_t
 MLSClientImpl::store_state(mls::State&& state, bool encrypt_handshake)
 {
   auto state_id = tls::get<uint32_t>(state.authentication_secret());
+  state_id += state.index().val;
+
   auto entry = CachedState{ std::move(state), encrypt_handshake, {}, {} };
   state_cache.emplace(std::make_pair(state_id, std::move(entry)));
   return state_id;
@@ -339,6 +350,9 @@ Status
 MLSClientImpl::generate_test_vector(const GenerateTestVectorRequest* request,
                                     GenerateTestVectorResponse* reply)
 {
+  // XXX(RLB): Should this value be set by the test runner?
+  static const uint32_t n_psks = 3;
+
   json j;
   switch (request->test_vector_type()) {
     case TestVectorType::TREE_MATH: {
@@ -355,8 +369,8 @@ MLSClientImpl::generate_test_vector(const GenerateTestVectorRequest* request,
 
     case TestVectorType::KEY_SCHEDULE: {
       auto suite = static_cast<mls::CipherSuite::ID>(request->cipher_suite());
-      j =
-        mls_vectors::KeyScheduleTestVector::create(suite, request->n_epochs());
+      j = mls_vectors::KeyScheduleTestVector::create(
+        suite, request->n_epochs(), n_psks);
       break;
     }
 
@@ -393,14 +407,22 @@ MLSClientImpl::create_group(const CreateGroupRequest* request,
   auto group_id = string_to_bytes(request->group_id());
   auto cipher_suite = mls_suite(request->cipher_suite());
 
-  auto init_priv = mls::HPKEPrivateKey::generate(cipher_suite);
+  auto leaf_priv = mls::HPKEPrivateKey::generate(cipher_suite);
   auto sig_priv = mls::SignaturePrivateKey::generate(cipher_suite);
   auto cred = mls::Credential::basic({}, cipher_suite, sig_priv.public_key);
-  auto key_package =
-    mls::KeyPackage(cipher_suite, init_priv.public_key, cred, sig_priv, {});
+
+  auto leaf_node = mls::LeafNode{
+    cipher_suite,
+    leaf_priv.public_key,
+    cred,
+    mls::Capabilities::create_default(),
+    mls::Lifetime::create_default(),
+    {},
+    sig_priv,
+  };
 
   auto state =
-    mls::State(group_id, cipher_suite, init_priv, sig_priv, key_package, {});
+    mls::State(group_id, cipher_suite, leaf_priv, sig_priv, leaf_node, {});
   auto state_id = store_state(std::move(state), request->encrypt_handshake());
 
   response->set_state_id(state_id);
@@ -414,14 +436,28 @@ MLSClientImpl::create_key_package(const CreateKeyPackageRequest* request,
   auto cipher_suite = mls_suite(request->cipher_suite());
 
   auto init_priv = mls::HPKEPrivateKey::generate(cipher_suite);
+  auto leaf_priv = mls::HPKEPrivateKey::generate(cipher_suite);
   auto sig_priv = mls::SignaturePrivateKey::generate(cipher_suite);
   auto cred = mls::Credential::basic({}, cipher_suite, sig_priv.public_key);
+
+  auto leaf = mls::LeafNode{
+    cipher_suite,
+    leaf_priv.public_key,
+    cred,
+    mls::Capabilities::create_default(),
+    mls::Lifetime::create_default(),
+    {},
+    sig_priv,
+  };
+
   auto kp =
-    mls::KeyPackage(cipher_suite, init_priv.public_key, cred, sig_priv, {});
+    mls::KeyPackage(cipher_suite, init_priv.public_key, leaf, {}, sig_priv);
 
   auto kp_data = tls::marshal(kp);
-  auto join_id =
-    store_join(std::move(init_priv), std::move(sig_priv), std::move(kp));
+  auto join_id = store_join(std::move(init_priv),
+                            std::move(leaf_priv),
+                            std::move(sig_priv),
+                            std::move(kp));
 
   response->set_transaction_id(join_id);
   response->set_key_package(bytes_to_string(kp_data));
@@ -440,8 +476,12 @@ MLSClientImpl::join_group(const JoinGroupRequest* request,
   auto welcome_data = string_to_bytes(request->welcome());
   auto welcome = tls::get<mls::Welcome>(welcome_data);
 
-  auto state = mls::State(
-    join->init_priv, join->sig_priv, join->key_package, welcome, std::nullopt);
+  auto state = mls::State(join->init_priv,
+                          std::move(join->leaf_priv),
+                          std::move(join->sig_priv),
+                          join->key_package,
+                          welcome,
+                          std::nullopt);
   auto state_id = store_state(std::move(state), request->encrypt_handshake());
 
   response->set_state_id(state_id);
@@ -456,10 +496,22 @@ MLSClientImpl::external_join(const ExternalJoinRequest* request,
   auto pgs = tls::get<mls::PublicGroupState>(pgs_data);
 
   auto init_priv = mls::HPKEPrivateKey::generate(pgs.cipher_suite);
+  auto leaf_priv = mls::HPKEPrivateKey::generate(pgs.cipher_suite);
   auto sig_priv = mls::SignaturePrivateKey::generate(pgs.cipher_suite);
   auto cred = mls::Credential::basic({}, pgs.cipher_suite, sig_priv.public_key);
+
+  auto leaf = mls::LeafNode{
+    pgs.cipher_suite,
+    leaf_priv.public_key,
+    cred,
+    mls::Capabilities::create_default(),
+    mls::Lifetime::create_default(),
+    {},
+    sig_priv,
+  };
+
   auto kp =
-    mls::KeyPackage(pgs.cipher_suite, init_priv.public_key, cred, sig_priv, {});
+    mls::KeyPackage(pgs.cipher_suite, init_priv.public_key, leaf, {}, sig_priv);
 
   auto leaf_secret = mls::random_bytes(pgs.cipher_suite.secret_size());
   auto [commit, state] =
@@ -578,8 +630,9 @@ MLSClientImpl::commit(CachedState& entry,
 
   auto leaf_secret =
     mls::random_bytes(entry.state.cipher_suite().secret_size());
-  auto [commit, welcome, next] =
-    entry.state.commit(leaf_secret, mls::CommitOpts{ inline_proposals, true });
+  auto [commit, welcome, next] = entry.state.commit(
+    leaf_secret,
+    mls::CommitOpts{ inline_proposals, true, entry.encrypt_handshake, {} });
 
   auto next_id = store_state(std::move(next), entry.encrypt_handshake);
 

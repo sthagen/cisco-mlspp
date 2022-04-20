@@ -12,14 +12,19 @@ class TreeKEMTest
 protected:
   const CipherSuite suite{ CipherSuite::ID::P256_AES128GCM_SHA256_P256 };
 
-  std::tuple<HPKEPrivateKey, SignaturePrivateKey, KeyPackage> new_key_package()
+  std::tuple<HPKEPrivateKey, SignaturePrivateKey, LeafNode> new_leaf_node()
   {
-    auto init_priv = HPKEPrivateKey::generate(suite);
+    auto leaf_priv = HPKEPrivateKey::generate(suite);
     auto sig_priv = SignaturePrivateKey::generate(suite);
     auto cred = Credential::basic({ 0, 1, 2, 3 }, suite, sig_priv.public_key);
-    auto kp =
-      KeyPackage{ suite, init_priv.public_key, cred, sig_priv, std::nullopt };
-    return std::make_tuple(init_priv, sig_priv, kp);
+    auto leaf = LeafNode(suite,
+                         leaf_priv.public_key,
+                         cred,
+                         Capabilities::create_default(),
+                         Lifetime::create_default(),
+                         {},
+                         sig_priv);
+    return std::make_tuple(leaf_priv, sig_priv, leaf);
   }
 };
 
@@ -29,9 +34,9 @@ TEST_CASE_FIXTURE(TreeKEMTest, "ParentNode Equality")
   auto initB = HPKEPrivateKey::generate(suite);
 
   auto nodeA =
-    ParentNode{ initA.public_key, { LeafIndex(1), LeafIndex(2) }, { 3, 4 } };
+    ParentNode{ initA.public_key, { 3, 4 }, { LeafIndex(1), LeafIndex(2) } };
   auto nodeB =
-    ParentNode{ initB.public_key, { LeafIndex(5), LeafIndex(6) }, { 7, 8 } };
+    ParentNode{ initB.public_key, { 7, 8 }, { LeafIndex(5), LeafIndex(6) } };
 
   REQUIRE(nodeA == nodeA);
   REQUIRE(nodeB == nodeB);
@@ -44,16 +49,17 @@ TEST_CASE_FIXTURE(TreeKEMTest, "Node public key")
   auto parent = Node{ ParentNode{ parent_priv.public_key, {}, {} } };
   REQUIRE(parent.public_key() == parent_priv.public_key);
 
-  auto [leaf_priv, sig_priv, kp] = new_key_package();
+  auto [leaf_priv_, sig_priv, leaf] = new_leaf_node();
+  auto leaf_priv = leaf_priv_;
   silence_unused(sig_priv);
 
-  auto leaf = Node{ kp };
-  REQUIRE(leaf.public_key() == leaf_priv.public_key);
+  auto leaf_node = Node{ leaf };
+  REQUIRE(leaf_node.public_key() == leaf_priv.public_key);
 }
 
 TEST_CASE_FIXTURE(TreeKEMTest, "Optional node hashes")
 {
-  const auto [init_priv, sig_priv, kp] = new_key_package();
+  const auto [init_priv, sig_priv, leaf] = new_leaf_node();
   silence_unused(sig_priv);
 
   auto node_index = NodeIndex{ 7 };
@@ -61,13 +67,15 @@ TEST_CASE_FIXTURE(TreeKEMTest, "Optional node hashes")
 
   auto parent = ParentNode{ init_priv.public_key, {}, {} };
   auto opt_parent = OptionalNode{ Node{ parent }, {} };
+  // NOLINTNEXTLINE(llvm-else-after-return, readability-else-after-return)
   REQUIRE_THROWS_AS(opt_parent.set_tree_hash(suite, node_index),
                     var::bad_variant_access);
 
   opt_parent.set_tree_hash(suite, node_index, child_hash, child_hash);
   REQUIRE_FALSE(opt_parent.hash.empty());
 
-  auto opt_leaf = OptionalNode{ Node{ kp }, {} };
+  auto opt_leaf = OptionalNode{ Node{ leaf }, {} };
+  // NOLINTNEXTLINE(llvm-else-after-return, readability-else-after-return)
   REQUIRE_THROWS_AS(
     opt_leaf.set_tree_hash(suite, node_index, child_hash, child_hash),
     var::bad_variant_access);
@@ -119,8 +127,11 @@ TEST_CASE_FIXTURE(TreeKEMTest, "TreeKEM Private Key")
   REQUIRE(priv_joiner.update_secret == last_update_secret);
 
   // shared_path_secret() finds the correct ancestor
-  auto [overlap, overlap_secret, found] =
+  auto [overlap_, overlap_secret_, found_] =
     priv_joiner.shared_path_secret(LeafIndex(0));
+  auto overlap = overlap_;
+  auto overlap_secret = overlap_secret_;
+  auto found = found_;
   REQUIRE(found);
   REQUIRE(overlap == NodeIndex(3));
   REQUIRE(overlap_secret == priv_joiner.path_secrets[overlap]);
@@ -152,54 +163,53 @@ TEST_CASE_FIXTURE(TreeKEMTest, "TreeKEM Public Key")
   auto pub = TreeKEMPublicKey{ suite };
   for (uint32_t i = 0; i < size.val; i++) {
     // Add a leaf
-    auto [init_priv, sig_priv, kp_before] = new_key_package();
+    auto [init_priv, sig_priv, leaf_before_] = new_leaf_node();
+    auto leaf_before = leaf_before_;
     silence_unused(init_priv);
 
     auto index = LeafIndex(i);
     auto curr_size = LeafCount(i + 1);
 
-    auto add_index = pub.add_leaf(kp_before);
+    auto add_index = pub.add_leaf(leaf_before);
     REQUIRE(add_index == index);
 
-    auto found = pub.find(kp_before);
+    auto found = pub.find(leaf_before);
     REQUIRE(found);
     REQUIRE(found == index);
 
-    auto found_kp = pub.key_package(index);
-    REQUIRE(found_kp);
-    REQUIRE(found_kp == kp_before);
+    auto found_leaf = pub.leaf_node(index);
+    REQUIRE(found_leaf);
+    REQUIRE(found_leaf == leaf_before);
 
     // Manually construct a direct path to populate nodes above the new leaf
-    auto path = UpdatePath{ kp_before, {} };
+    auto path = UpdatePath{ leaf_before, {} };
     auto dp = tree_math::dirpath(NodeIndex(index), curr_size);
     while (path.nodes.size() < dp.size()) {
       auto node_pub = HPKEPrivateKey::generate(suite).public_key;
       path.nodes.push_back({ node_pub, {} });
     }
 
-    auto opts = KeyPackageOpts{};
-    opts.extensions.add(ParentHashExtension{ from_ascii("bogus parent hash") });
-    path.leaf_key_package.sign(sig_priv, opts);
+    path.leaf_node.sign(suite, sig_priv, std::nullopt);
 
     // Merge the direct path (ignoring parent hash validity)
     pub.merge(index, path);
 
-    auto kp_after = path.leaf_key_package;
-    found = pub.find(kp_after);
+    auto leaf_after = path.leaf_node;
+    found = pub.find(leaf_after);
     REQUIRE(found);
     REQUIRE(found == index);
     for (const auto& dpn : dp) {
       REQUIRE(pub.node_at(dpn).node);
     }
 
-    found_kp = pub.key_package(index);
-    REQUIRE(found_kp);
-    REQUIRE(found_kp == kp_after);
+    found_leaf = pub.leaf_node(index);
+    REQUIRE(found_leaf);
+    REQUIRE(found_leaf == leaf_after);
   }
 
   // Remove a node and verify that the resolution comes out right
   pub.blank_path(removed);
-  REQUIRE_FALSE(pub.key_package(removed));
+  REQUIRE_FALSE(pub.leaf_node(removed));
   REQUIRE(root_resolution == pub.resolve(root));
 }
 
@@ -207,57 +217,66 @@ TEST_CASE_FIXTURE(TreeKEMTest, "TreeKEM encap/decap")
 {
   const auto size = LeafCount{ 10 };
 
-  auto pub = TreeKEMPublicKey{ suite };
   auto privs = std::vector<TreeKEMPrivateKey>{};
+  auto pubs = std::vector<TreeKEMPublicKey>{};
   auto sig_privs = std::vector<SignaturePrivateKey>{};
 
   // Add the first member
-  auto [init_priv_0, sig_priv_0, kp0] = new_key_package();
+  auto [init_priv_0, sig_priv_0, leaf0] = new_leaf_node();
   sig_privs.push_back(sig_priv_0);
 
-  auto index_0 = pub.add_leaf(kp0);
+  auto pub = TreeKEMPublicKey{ suite };
+  auto index_0 = pub.add_leaf(leaf0);
+  pubs.push_back(pub);
   REQUIRE(index_0 == LeafIndex{ 0 });
 
   auto priv = TreeKEMPrivateKey::solo(suite, index_0, init_priv_0);
   privs.push_back(priv);
   REQUIRE(priv.consistent(pub));
 
+  auto group_id = from_ascii("group");
   for (uint32_t i = 0; i < size.val - 2; i++) {
     auto adder = LeafIndex{ i };
     auto joiner = LeafIndex{ i + 1 };
     auto context = bytes{ uint8_t(i) };
-    auto [init_priv, sig_priv, kp] = new_key_package();
+    auto [init_priv, sig_priv, leaf] = new_leaf_node();
     silence_unused(init_priv);
     sig_privs.push_back(sig_priv);
 
     // Add the new joiner
-    auto index = pub.add_leaf(kp);
+    auto index = pubs[i].add_leaf(leaf);
     REQUIRE(index == joiner);
 
     auto leaf_secret = random_bytes(32);
-    auto [new_adder_priv, path] = pub.encap(
-      adder, context, leaf_secret, sig_privs.back(), {}, std::nullopt);
+    auto [new_adder_priv, path_] = pubs[i].encap(
+      adder, group_id, context, leaf_secret, sig_privs.back(), {}, {});
+    auto path = path_;
     privs[i] = new_adder_priv;
-    REQUIRE(pub.parent_hash_valid(adder, path));
+    REQUIRE(pubs[i].parent_hash_valid(adder, path));
 
-    pub.merge(adder, path);
-    REQUIRE(privs[i].consistent(pub));
-
-    auto [overlap, path_secret, ok] = privs[i].shared_path_secret(joiner);
+    auto [overlap, path_secret, ok_] = privs[i].shared_path_secret(joiner);
+    auto ok = ok_;
     REQUIRE(ok);
+
+    pubs[i].merge(adder, path);
+    REQUIRE(privs[i].consistent(pubs[i]));
 
     // New joiner initializes their private key
     auto joiner_priv = TreeKEMPrivateKey::joiner(
-      suite, pub.size(), joiner, init_priv, overlap, path_secret);
+      suite, pubs[i].size(), joiner, init_priv, overlap, path_secret);
     privs.push_back(joiner_priv);
+    pubs.push_back(pubs[i]);
     REQUIRE(privs[i + 1].consistent(privs[i]));
-    REQUIRE(privs[i + 1].consistent(pub));
+    REQUIRE(privs[i + 1].consistent(pubs[i + 1]));
 
     // Other members update via decap()
     for (uint32_t j = 0; j < i; j++) {
-      privs[j].decap(adder, pub, context, path, {});
+      pubs[j].add_leaf(leaf);
+      privs[j].decap(adder, pubs[j], context, path, {});
+      pubs[j].merge(adder, path);
+
       REQUIRE(privs[j].consistent(privs[i]));
-      REQUIRE(privs[j].consistent(pub));
+      REQUIRE(privs[j].consistent(pubs[j]));
     }
   }
 }

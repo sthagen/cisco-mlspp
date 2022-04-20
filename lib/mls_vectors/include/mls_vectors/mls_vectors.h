@@ -20,9 +20,16 @@ struct HexBytes
   bytes data;
 
   HexBytes() = default;
+
   HexBytes(bytes data_in)
     : data(std::move(data_in))
   {}
+
+  HexBytes(std::vector<uint8_t> data_in)
+    : data(std::move(data_in))
+  {}
+
+  operator const std::vector<uint8_t>&() const { return data; }
   operator const bytes&() const { return data; }
   operator bytes&() { return data; }
 };
@@ -71,8 +78,8 @@ struct EncryptionTestVector
   };
 
   mls::CipherSuite cipher_suite;
-  mls::LeafCount n_leaves;
 
+  HexBytes tree;
   HexBytes encryption_secret;
   HexBytes sender_data_secret;
   SenderDataInfo sender_data_info;
@@ -87,17 +94,26 @@ struct EncryptionTestVector
 
 struct KeyScheduleTestVector
 {
+  struct ExternalPSKInfo
+  {
+    HexBytes id;
+    HexBytes nonce;
+    HexBytes secret;
+  };
+
   struct Epoch
   {
     // Chosen by the generator
     HexBytes tree_hash;
     HexBytes commit_secret;
-    HexBytes psk_secret;
     HexBytes confirmed_transcript_hash;
+    std::vector<ExternalPSKInfo> external_psks;
+    HexBytes branch_psk_nonce;
 
     // Computed values
     HexBytes group_context;
 
+    HexBytes psk_secret;
     HexBytes joiner_secret;
     HexBytes welcome_secret;
     HexBytes init_secret;
@@ -122,7 +138,8 @@ struct KeyScheduleTestVector
   std::vector<Epoch> epochs;
 
   static KeyScheduleTestVector create(mls::CipherSuite suite,
-                                      uint32_t n_epochs);
+                                      uint32_t n_epochs,
+                                      uint32_t n_psks);
   std::optional<std::string> verify() const;
 };
 
@@ -138,6 +155,7 @@ struct TranscriptTestVector
 
   HexBytes membership_key;
   HexBytes confirmation_key;
+  mls::Credential credential;
   mls::MLSPlaintext commit;
 
   HexBytes group_context;
@@ -151,12 +169,13 @@ struct TranscriptTestVector
 struct TreeKEMTestVector
 {
   mls::CipherSuite cipher_suite;
+  HexBytes group_id;
 
   mls::TreeKEMPublicKey ratchet_tree_before;
 
   mls::LeafIndex add_sender;
   HexBytes my_leaf_secret;
-  mls::KeyPackage my_key_package;
+  mls::LeafNode my_leaf_node;
   HexBytes my_path_secret;
 
   mls::LeafIndex update_sender;
@@ -177,8 +196,6 @@ struct TreeKEMTestVector
 struct MessagesTestVector
 {
   HexBytes key_package;
-  HexBytes capabilities;
-  HexBytes lifetime;
   HexBytes ratchet_tree;
 
   HexBytes group_info;

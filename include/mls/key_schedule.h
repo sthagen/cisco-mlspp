@@ -23,6 +23,9 @@ struct HashRatchet
   // These defaults are necessary for use with containers
   HashRatchet() = default;
   HashRatchet(const HashRatchet& other) = default;
+  HashRatchet(HashRatchet&& other) = default;
+  HashRatchet& operator=(const HashRatchet& other) = default;
+  HashRatchet& operator=(HashRatchet&& other) = default;
 
   HashRatchet(CipherSuite suite_in, NodeIndex node_in, bytes base_secret_in);
 
@@ -65,10 +68,12 @@ struct GroupKeySource
   KeyAndNonce get(RatchetType type, LeafIndex sender, uint32_t generation);
   void erase(RatchetType type, LeafIndex sender, uint32_t generation);
 
-  MLSCiphertext encrypt(LeafIndex index,
+  MLSCiphertext encrypt(const TreeKEMPublicKey& tree,
+                        LeafIndex index,
                         const bytes& sender_data_secret,
                         const MLSPlaintext& pt);
-  MLSPlaintext decrypt(const bytes& sender_data_secret,
+  MLSPlaintext decrypt(const TreeKEMPublicKey& tree,
+                       const bytes& sender_data_secret,
                        const MLSCiphertext& ct);
 
 private:
@@ -90,6 +95,7 @@ private:
 
 public:
   bytes joiner_secret;
+  bytes psk_secret;
   bytes epoch_secret;
 
   bytes sender_data_secret;
@@ -109,7 +115,7 @@ public:
   // Full initializer, used by invited joiner
   KeyScheduleEpoch(CipherSuite suite_in,
                    const bytes& joiner_secret,
-                   const bytes& psk_secret,
+                   const std::vector<PSKWithSecret>& psks,
                    const bytes& context);
 
   // Ciphersuite-only initializer, used by external joiner
@@ -124,7 +130,7 @@ public:
   KeyScheduleEpoch(CipherSuite suite_in,
                    const bytes& init_secret,
                    const bytes& commit_secret,
-                   const bytes& psk_secret,
+                   const std::vector<PSKWithSecret>& psks,
                    const bytes& context);
 
   static std::tuple<bytes, bytes> external_init(
@@ -133,7 +139,7 @@ public:
   bytes receive_external_init(const bytes& kem_output) const;
 
   KeyScheduleEpoch next(const bytes& commit_secret,
-                        const bytes& psk_secret,
+                        const std::vector<PSKWithSecret>& psks,
                         const std::optional<bytes>& force_init_secret,
                         const bytes& context) const;
 
@@ -144,10 +150,12 @@ public:
   bytes do_export(const std::string& label,
                   const bytes& context,
                   size_t size) const;
+  PSKWithSecret branch_psk(const bytes& group_id, epoch_t epoch);
+  PSKWithSecret reinit_psk(const bytes& group_id, epoch_t epoch);
 
   static bytes welcome_secret(CipherSuite suite,
                               const bytes& joiner_secret,
-                              const bytes& psk_secret);
+                              const std::vector<PSKWithSecret>& psks);
   static KeyAndNonce sender_data_keys(CipherSuite suite,
                                       const bytes& sender_data_secret,
                                       const bytes& ciphertext);

@@ -1,7 +1,6 @@
 #include <mls/session.h>
 
 #include <mls/messages.h>
-#include <mls/state.h>
 
 #include <deque>
 
@@ -15,18 +14,17 @@ struct PendingJoin::Inner
 {
   const CipherSuite suite;
   const HPKEPrivateKey init_priv;
+  const HPKEPrivateKey leaf_priv;
   const SignaturePrivateKey sig_priv;
   const KeyPackage key_package;
 
   Inner(CipherSuite suite_in,
         SignaturePrivateKey sig_priv_in,
-        Credential cred_in,
-        const std::optional<KeyPackageOpts>& opts_in);
+        Credential cred_in);
 
   static PendingJoin create(CipherSuite suite,
                             SignaturePrivateKey sig_priv,
-                            Credential cred,
-                            const std::optional<KeyPackageOpts>& opts_in);
+                            Credential cred);
 };
 
 struct Session::Inner
@@ -37,11 +35,13 @@ struct Session::Inner
 
   explicit Inner(State state);
 
-  static Session begin(const bytes& group_id,
-                       const HPKEPrivateKey& init_priv,
+  static Session begin(CipherSuite suite,
+                       const bytes& group_id,
+                       const HPKEPrivateKey& leaf_priv,
                        const SignaturePrivateKey& sig_priv,
-                       const KeyPackage& key_package);
+                       const LeafNode& leaf_node);
   static Session join(const HPKEPrivateKey& init_priv,
+                      const HPKEPrivateKey& leaf_priv,
                       const SignaturePrivateKey& sig_priv,
                       const KeyPackage& key_package,
                       const bytes& welcome_data);
@@ -59,26 +59,31 @@ struct Session::Inner
 
 Client::Client(CipherSuite suite_in,
                SignaturePrivateKey sig_priv_in,
-               Credential cred_in,
-               std::optional<KeyPackageOpts> opts_in)
+               Credential cred_in)
   : suite(suite_in)
   , sig_priv(std::move(sig_priv_in))
   , cred(std::move(cred_in))
-  , opts(std::move(opts_in))
 {}
 
 Session
 Client::begin_session(const bytes& group_id) const
 {
-  auto init_priv = HPKEPrivateKey::generate(suite);
-  auto kp = KeyPackage{ suite, init_priv.public_key, cred, sig_priv, opts };
-  return Session::Inner::begin(group_id, init_priv, sig_priv, kp);
+  auto leaf_priv = HPKEPrivateKey::generate(suite);
+  auto leaf_node = LeafNode(suite,
+                            leaf_priv.public_key,
+                            cred,
+                            Capabilities::create_default(),
+                            Lifetime::create_default(),
+                            {},
+                            sig_priv);
+
+  return Session::Inner::begin(suite, group_id, leaf_priv, sig_priv, leaf_node);
 }
 
 PendingJoin
 Client::start_join() const
 {
-  return PendingJoin::Inner::create(suite, sig_priv, cred, opts);
+  return PendingJoin::Inner::create(suite, sig_priv, cred);
 }
 
 ///
@@ -87,27 +92,32 @@ Client::start_join() const
 
 PendingJoin::Inner::Inner(CipherSuite suite_in,
                           SignaturePrivateKey sig_priv_in,
-                          Credential cred_in,
-                          const std::optional<KeyPackageOpts>& opts_in)
+                          Credential cred_in)
   : suite(suite_in)
   , init_priv(HPKEPrivateKey::generate(suite))
+  , leaf_priv(HPKEPrivateKey::generate(suite))
   , sig_priv(std::move(sig_priv_in))
   , key_package(suite,
                 init_priv.public_key,
-                std::move(cred_in),
-                sig_priv,
-                opts_in)
+                LeafNode(suite,
+                         leaf_priv.public_key,
+                         std::move(cred_in),
+                         Capabilities::create_default(),
+                         Lifetime::create_default(),
+                         {},
+                         sig_priv),
+                {},
+                sig_priv)
 {}
 
 PendingJoin
 PendingJoin::Inner::create(CipherSuite suite,
                            SignaturePrivateKey sig_priv,
-                           Credential cred,
-                           const std::optional<KeyPackageOpts>& opts_in)
+                           Credential cred)
 {
-  auto inner = std::make_unique<Inner>(
-    suite, std::move(sig_priv), std::move(cred), opts_in);
-  return PendingJoin(inner.release());
+  auto inner =
+    std::make_unique<Inner>(suite, std::move(sig_priv), std::move(cred));
+  return { inner.release() };
 }
 
 PendingJoin::PendingJoin(PendingJoin&& other) noexcept = default;
@@ -130,8 +140,11 @@ PendingJoin::key_package() const
 Session
 PendingJoin::complete(const bytes& welcome) const
 {
-  return Session::Inner::join(
-    inner->init_priv, inner->sig_priv, inner->key_package, welcome);
+  return Session::Inner::join(inner->init_priv,
+                              inner->leaf_priv,
+                              inner->sig_priv,
+                              inner->key_package,
+                              welcome);
 }
 
 ///
@@ -144,28 +157,30 @@ Session::Inner::Inner(State state)
 {}
 
 Session
-Session::Inner::begin(const bytes& group_id,
-                      const HPKEPrivateKey& init_priv,
+Session::Inner::begin(CipherSuite suite,
+                      const bytes& group_id,
+                      const HPKEPrivateKey& leaf_priv,
                       const SignaturePrivateKey& sig_priv,
-                      const KeyPackage& key_package)
+                      const LeafNode& leaf_node)
 {
-  auto state = State(
-    group_id, key_package.cipher_suite, init_priv, sig_priv, key_package, {});
+  auto state = State(group_id, suite, leaf_priv, sig_priv, leaf_node, {});
   auto inner = std::make_unique<Inner>(state);
-  return Session(inner.release());
+  return { inner.release() };
 }
 
 Session
 Session::Inner::join(const HPKEPrivateKey& init_priv,
+                     const HPKEPrivateKey& leaf_priv,
                      const SignaturePrivateKey& sig_priv,
                      const KeyPackage& key_package,
                      const bytes& welcome_data)
 {
   auto welcome = tls::get<Welcome>(welcome_data);
 
-  auto state = State(init_priv, sig_priv, key_package, welcome, std::nullopt);
+  auto state =
+    State(init_priv, leaf_priv, sig_priv, key_package, welcome, std::nullopt);
   auto inner = std::make_unique<Inner>(state);
-  return Session(inner.release());
+  return { inner.release() };
 }
 
 bytes
@@ -189,12 +204,30 @@ Session::Inner::export_message(const MLSPlaintext& plaintext)
 MLSPlaintext
 Session::Inner::import_message(const bytes& encoded)
 {
-  if (!encrypt_handshake) {
-    return tls::get<MLSPlaintext>(encoded);
-  }
+  auto wire_format = WireFormat::reserved;
+  auto r = tls::istream(encoded);
+  r >> wire_format;
 
-  auto ciphertext = tls::get<MLSCiphertext>(encoded);
-  return history.front().decrypt(ciphertext);
+  switch (wire_format) {
+    case WireFormat::mls_plaintext:
+      if (encrypt_handshake) {
+        throw ProtocolError("Handshake not encrypted as required");
+      }
+
+      return tls::get<MLSPlaintext>(encoded);
+
+    case WireFormat::mls_ciphertext: {
+      if (!encrypt_handshake) {
+        throw ProtocolError("Unexpected handshake encryption");
+      }
+
+      auto ciphertext = tls::get<MLSCiphertext>(encoded);
+      return history.front().decrypt(ciphertext);
+    }
+
+    default:
+      throw InvalidParameterError("Illegal wire format");
+  }
 }
 
 void
@@ -250,7 +283,7 @@ bytes
 Session::update()
 {
   auto leaf_secret = inner->fresh_secret();
-  auto proposal = inner->history.front().update(leaf_secret);
+  auto proposal = inner->history.front().update(leaf_secret, {});
   return inner->export_message(proposal);
 }
 
@@ -258,6 +291,13 @@ bytes
 Session::remove(uint32_t index)
 {
   auto proposal = inner->history.front().remove(RosterIndex{ index });
+  return inner->export_message(proposal);
+}
+
+bytes
+Session::remove(const LeafNodeRef& ref)
+{
+  auto proposal = inner->history.front().remove(ref);
   return inner->export_message(proposal);
 }
 
@@ -286,8 +326,9 @@ std::tuple<bytes, bytes>
 Session::commit()
 {
   auto commit_secret = inner->fresh_secret();
-  auto [commit, welcome, new_state] =
-    inner->history.front().commit(commit_secret, CommitOpts{ {}, true });
+  auto encrypt = inner->encrypt_handshake;
+  auto [commit, welcome, new_state] = inner->history.front().commit(
+    commit_secret, CommitOpts{ {}, true, encrypt, {} });
 
   auto commit_msg = inner->export_message(commit);
   auto welcome_msg = tls::marshal(welcome);
@@ -301,13 +342,12 @@ Session::handle(const bytes& handshake_data)
 {
   auto pt = inner->import_message(handshake_data);
 
-  if (pt.sender.sender_type != SenderType::member) {
+  if (pt.sender.sender_type() != SenderType::member) {
     throw ProtocolError("External senders not supported");
   }
 
   const auto is_commit = var::holds_alternative<Commit>(pt.content);
-  if (is_commit &&
-      LeafIndex(pt.sender.sender) == inner->history.front().index()) {
+  if (is_commit && pt.sender.sender == inner->history.front().ref()) {
     if (!inner->outbound_cache) {
       throw ProtocolError("Received from self without sending");
     }
@@ -332,15 +372,39 @@ Session::handle(const bytes& handshake_data)
 }
 
 epoch_t
-Session::current_epoch() const
+Session::epoch() const
 {
   return inner->history.front().epoch();
 }
 
-uint32_t
+LeafNodeRef
+Session::ref() const
+{
+  return inner->history.front().ref();
+}
+
+LeafIndex
 Session::index() const
 {
-  return inner->history.front().index().val;
+  return inner->history.front().index();
+}
+
+CipherSuite
+Session::cipher_suite() const
+{
+  return inner->history.front().cipher_suite();
+}
+
+const ExtensionList&
+Session::extensions() const
+{
+  return inner->history.front().extensions();
+}
+
+const TreeKEMPublicKey&
+Session::tree() const
+{
+  return inner->history.front().tree();
 }
 
 bytes
@@ -351,7 +415,13 @@ Session::do_export(const std::string& label,
   return inner->history.front().do_export(label, context, size);
 }
 
-std::vector<KeyPackage>
+PublicGroupState
+Session::public_group_state() const
+{
+  return inner->history.front().public_group_state();
+}
+
+std::vector<LeafNode>
 Session::roster() const
 {
   return inner->history.front().roster();

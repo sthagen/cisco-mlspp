@@ -31,7 +31,7 @@ protected:
   void broadcast(const bytes& message, const uint32_t except)
   {
     for (auto& session : sessions) {
-      if (except != no_except && session.index() == except) {
+      if (except != no_except && session.index().val == except) {
         continue;
       }
 
@@ -50,7 +50,7 @@ protected:
     auto id_priv = new_identity_key();
     auto init_priv = new_init_key();
     auto cred = Credential::basic(user_id, suite, id_priv.public_key);
-    auto client = Client(suite, id_priv, cred, std::nullopt);
+    auto client = Client(suite, id_priv, cred);
 
     // Initial add is different
     if (sessions.empty()) {
@@ -59,7 +59,7 @@ protected:
       return;
     }
 
-    auto initial_epoch = sessions[0].current_epoch();
+    auto initial_epoch = sessions[0].epoch();
 
     auto join = client.start_join();
 
@@ -100,7 +100,7 @@ protected:
     // Verify that everyone ended up in consistent states, and that
     // they can send and be received.
     for (auto& session : sessions) {
-      if (except != no_except && session.index() == except) {
+      if (except != no_except && session.index().val == except) {
         continue;
       }
 
@@ -109,7 +109,7 @@ protected:
       auto plaintext = bytes{ 0, 1, 2, 3 };
       auto encrypted = session.protect(plaintext);
       for (auto& other : sessions) {
-        if (except != no_except && other.index() == except) {
+        if (except != no_except && other.index().val == except) {
           continue;
         }
 
@@ -121,7 +121,7 @@ protected:
     }
 
     // Verify that the epoch got updated
-    REQUIRE(sessions[ref].current_epoch() != initial_epoch);
+    REQUIRE(sessions[ref].epoch() != initial_epoch);
   }
 };
 
@@ -151,7 +151,7 @@ protected:
 TEST_CASE_FIXTURE(RunningSessionTest, "Update within Session")
 {
   for (int i = 0; i < group_size; i += 1) {
-    auto initial_epoch = sessions[0].current_epoch();
+    auto initial_epoch = sessions[0].epoch();
 
     auto update = sessions[i].update();
     broadcast(update);
@@ -166,7 +166,7 @@ TEST_CASE_FIXTURE(RunningSessionTest, "Update within Session")
 TEST_CASE_FIXTURE(RunningSessionTest, "Remove within Session")
 {
   for (int i = group_size - 1; i > 0; i -= 1) {
-    auto initial_epoch = sessions[0].current_epoch();
+    auto initial_epoch = sessions[0].epoch();
     auto evict_secret = fresh_secret();
     sessions.pop_back();
 
@@ -186,7 +186,7 @@ TEST_CASE_FIXTURE(RunningSessionTest, "Replace within Session")
     auto target = (i + 1) % group_size;
 
     // Remove target
-    auto initial_epoch = sessions[i].current_epoch();
+    auto initial_epoch = sessions[i].epoch();
     auto remove = sessions[i].remove(target);
     broadcast(remove, target);
     auto welcome_commit = sessions[i].commit();
@@ -194,7 +194,7 @@ TEST_CASE_FIXTURE(RunningSessionTest, "Replace within Session")
     check(initial_epoch, target);
 
     // Re-add at target
-    initial_epoch = sessions[i].current_epoch();
+    initial_epoch = sessions[i].epoch();
     broadcast_add(i, target);
     check(initial_epoch, target);
   }
@@ -206,7 +206,7 @@ TEST_CASE_FIXTURE(RunningSessionTest, "Full Session Life-Cycle")
 
   // 2. Have everyone update
   for (int i = 0; i < group_size - 1; i += 1) {
-    auto initial_epoch = sessions[0].current_epoch();
+    auto initial_epoch = sessions[0].epoch();
     auto update = sessions[i].update();
     broadcast(update);
     auto welcome_commit = sessions[i].commit();
@@ -216,7 +216,7 @@ TEST_CASE_FIXTURE(RunningSessionTest, "Full Session Life-Cycle")
 
   // 3. Remove everyone but the creator
   for (int i = group_size - 1; i > 0; i -= 1) {
-    auto initial_epoch = sessions[0].current_epoch();
+    auto initial_epoch = sessions[0].epoch();
     sessions.pop_back();
     auto remove = sessions[i - 1].remove(i);
     broadcast(remove);
@@ -277,27 +277,20 @@ TEST_CASE("Session with X509 Credential")
     mls::CipherSuite::ID::P256_AES128GCM_SHA256_P256
   };
 
-  std::string alice_name = "alice";
-  auto alice_id = bytes(alice_name.begin(), alice_name.end());
-
-  mls::Credential alice_cred = mls::Credential::x509(der_chain);
+  auto alice_id = from_ascii("alice");
   auto alice_sig_priv = mls::SignaturePrivateKey::parse(suite, key_raw);
-  mls::KeyPackageOpts alice_opts_in;
-  alice_opts_in.extensions.add(mls::KeyIDExtension{ alice_id });
-  mls::Client alice_client(suite, alice_sig_priv, alice_cred, alice_opts_in);
+  auto alice_cred = mls::Credential::x509(der_chain);
+  auto alice_client = mls::Client(suite, alice_sig_priv, alice_cred);
 
   auto group_id = bytes{ 0, 1, 2, 3 };
   auto alice_session = alice_client.begin_session(group_id);
 
-  std::string bob_name = "bob";
-  auto bob_id = bytes(bob_name.begin(), bob_name.end());
+  auto bob_id = from_ascii("bob");
   auto bob_sig_priv = mls::SignaturePrivateKey::generate(suite);
   auto bob_cred =
     mls::Credential::basic(bob_id, suite, bob_sig_priv.public_key);
-  mls::KeyPackageOpts bob_opts_in;
-  bob_opts_in.extensions.add(mls::KeyIDExtension{ bob_id });
 
-  mls::Client bob_client(suite, bob_sig_priv, bob_cred, bob_opts_in);
+  auto bob_client = mls::Client(suite, bob_sig_priv, bob_cred);
 
   auto bob_pending_join = bob_client.start_join();
 

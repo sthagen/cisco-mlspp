@@ -1,5 +1,7 @@
+#include <mls/core_types.h>
 #include <mls/crypto.h>
 #include <mls/log.h>
+#include <mls/messages.h>
 
 #include <iostream>
 #include <string>
@@ -153,7 +155,6 @@ struct HKDFLabel
   bytes context;
 
   TLS_SERIALIZABLE(length, label, context)
-  TLS_TRAITS(tls::pass, tls::vector<1>, tls::vector<4>)
 };
 
 bytes
@@ -191,6 +192,42 @@ const std::array<CipherSuite::ID, 6> all_supported_suites = {
   CipherSuite::ID::X448_CHACHA20POLY1305_SHA512_Ed448,
 };
 
+// MakeKeyPackageRef(value) = KDF.expand(
+//   KDF.extract("", value), "MLS 1.0 KeyPackage Reference", 16)
+template<>
+const bytes&
+CipherSuite::reference_label<KeyPackage>()
+{
+  static const auto label = from_ascii("MLS 1.0 KeyPackage Reference");
+  return label;
+}
+
+// MakeLeafNodeRef(value) = KDF.expand(
+//   KDF.extract("", value), "MLS 1.0 Leaf Node Reference", 16)
+template<>
+const bytes&
+CipherSuite::reference_label<LeafNode>()
+{
+  static const auto label = from_ascii("MLS 1.0 Leaf Node Reference");
+  return label;
+}
+
+// MakeProposalRef(value) = KDF.expand(
+//   KDF.extract("", value), "MLS 1.0 Proposal Reference", 16)
+//
+// Even though the label says "Proposal", we actually hash the entire enclosing
+// MLSPlaintext object.
+//
+// XXX(RLB): Is this still the case with the MLSMessage transition?  Does the
+// spec reflect this accurately?
+template<>
+const bytes&
+CipherSuite::reference_label<MLSPlaintext>()
+{
+  static const auto label = from_ascii("MLS 1.0 Proposal Reference");
+  return label;
+}
+
 ///
 /// Utilities
 ///
@@ -206,7 +243,7 @@ constant_time_eq(const bytes& lhs, const bytes& rhs)
   for (size_t i = 0; i < size; ++i) {
     // Not sure why the linter thinks `diff` is signed
     // NOLINTNEXTLINE(hicpp-signed-bitwise)
-    diff |= (lhs[i] ^ rhs[i]);
+    diff |= (lhs.at(i) ^ rhs.at(i));
   }
   return (diff == 0);
 }
@@ -216,24 +253,25 @@ constant_time_eq(const bytes& lhs, const bytes& rhs)
 ///
 HPKECiphertext
 HPKEPublicKey::encrypt(CipherSuite suite,
+                       const bytes& info,
                        const bytes& aad,
                        const bytes& pt) const
 {
   auto pkR = suite.hpke().kem.deserialize(data);
-  auto [enc, ctx] = suite.hpke().setup_base_s(*pkR, {});
+  auto [enc, ctx] = suite.hpke().setup_base_s(*pkR, info);
   auto ct = ctx.seal(aad, pt);
   return HPKECiphertext{ enc, ct };
 }
 
 std::tuple<bytes, bytes>
 HPKEPublicKey::do_export(CipherSuite suite,
+                         const bytes& info,
                          const std::string& label,
                          size_t size) const
 {
-  auto label_data = bytes(label.begin(), label.end());
-
+  auto label_data = from_ascii(label);
   auto pkR = suite.hpke().kem.deserialize(data);
-  auto [enc, ctx] = suite.hpke().setup_base_s(*pkR, {});
+  auto [enc, ctx] = suite.hpke().setup_base_s(*pkR, info);
   auto exported = ctx.do_export(label_data, size);
   return std::make_tuple(enc, exported);
 }
@@ -245,7 +283,7 @@ HPKEPrivateKey::generate(CipherSuite suite)
   auto priv_data = suite.hpke().kem.serialize_private(*priv);
   auto pub = priv->public_key();
   auto pub_data = suite.hpke().kem.serialize(*pub);
-  return HPKEPrivateKey(priv_data, pub_data);
+  return { priv_data, pub_data };
 }
 
 HPKEPrivateKey
@@ -254,7 +292,7 @@ HPKEPrivateKey::parse(CipherSuite suite, const bytes& data)
   auto priv = suite.hpke().kem.deserialize_private(data);
   auto pub = priv->public_key();
   auto pub_data = suite.hpke().kem.serialize(*pub);
-  return HPKEPrivateKey(data, pub_data);
+  return { data, pub_data };
 }
 
 HPKEPrivateKey
@@ -264,16 +302,17 @@ HPKEPrivateKey::derive(CipherSuite suite, const bytes& secret)
   auto priv_data = suite.hpke().kem.serialize_private(*priv);
   auto pub = priv->public_key();
   auto pub_data = suite.hpke().kem.serialize(*pub);
-  return HPKEPrivateKey(priv_data, pub_data);
+  return { priv_data, pub_data };
 }
 
 bytes
 HPKEPrivateKey::decrypt(CipherSuite suite,
+                        const bytes& info,
                         const bytes& aad,
                         const HPKECiphertext& ct) const
 {
   auto skR = suite.hpke().kem.deserialize_private(data);
-  auto ctx = suite.hpke().setup_base_r(ct.kem_output, *skR, {});
+  auto ctx = suite.hpke().setup_base_r(ct.kem_output, *skR, info);
   auto pt = ctx.open(aad, ct.ciphertext);
   if (!pt) {
     throw InvalidParameterError("HPKE decryption failure");
@@ -284,14 +323,14 @@ HPKEPrivateKey::decrypt(CipherSuite suite,
 
 bytes
 HPKEPrivateKey::do_export(CipherSuite suite,
+                          const bytes& info,
                           const bytes& kem_output,
                           const std::string& label,
                           size_t size) const
 {
-  auto label_data = bytes(label.begin(), label.end());
-
+  auto label_data = from_ascii(label);
   auto skR = suite.hpke().kem.deserialize_private(data);
-  auto ctx = suite.hpke().setup_base_r(kem_output, *skR, {});
+  auto ctx = suite.hpke().setup_base_r(kem_output, *skR, info);
   return ctx.do_export(label_data, size);
 }
 
@@ -319,7 +358,7 @@ SignaturePrivateKey::generate(CipherSuite suite)
   auto priv_data = suite.sig().serialize_private(*priv);
   auto pub = priv->public_key();
   auto pub_data = suite.sig().serialize(*pub);
-  return SignaturePrivateKey(priv_data, pub_data);
+  return { priv_data, pub_data };
 }
 
 SignaturePrivateKey
@@ -328,7 +367,7 @@ SignaturePrivateKey::parse(CipherSuite suite, const bytes& data)
   auto priv = suite.sig().deserialize_private(data);
   auto pub = priv->public_key();
   auto pub_data = suite.sig().serialize(*pub);
-  return SignaturePrivateKey(data, pub_data);
+  return { data, pub_data };
 }
 
 SignaturePrivateKey
@@ -338,7 +377,7 @@ SignaturePrivateKey::derive(CipherSuite suite, const bytes& secret)
   auto priv_data = suite.sig().serialize_private(*priv);
   auto pub = priv->public_key();
   auto pub_data = suite.sig().serialize(*pub);
-  return SignaturePrivateKey(priv_data, pub_data);
+  return { priv_data, pub_data };
 }
 
 bytes

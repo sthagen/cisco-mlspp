@@ -99,7 +99,9 @@ struct tls_serializer
 
 TLS_SERIALIZER(mls::HPKEPublicKey)
 TLS_SERIALIZER(mls::TreeKEMPublicKey)
+TLS_SERIALIZER(mls::Credential)
 TLS_SERIALIZER(mls::MLSPlaintext)
+TLS_SERIALIZER(mls::LeafNode)
 TLS_SERIALIZER(mls::UpdatePath)
 TLS_SERIALIZER(mls::KeyPackage)
 
@@ -134,17 +136,23 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EncryptionTestVector::LeafInfo,
                                    application)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EncryptionTestVector,
                                    cipher_suite,
-                                   n_leaves,
+                                   tree,
                                    encryption_secret,
                                    sender_data_secret,
                                    sender_data_info,
                                    leaves)
 
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(KeyScheduleTestVector::ExternalPSKInfo,
+                                   id,
+                                   nonce,
+                                   secret)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(KeyScheduleTestVector::Epoch,
                                    tree_hash,
                                    commit_secret,
-                                   psk_secret,
                                    confirmed_transcript_hash,
+                                   external_psks,
+                                   branch_psk_nonce,
+                                   psk_secret,
                                    group_context,
                                    joiner_secret,
                                    welcome_secret,
@@ -173,6 +181,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(TranscriptTestVector,
                                    interim_transcript_hash_before,
                                    membership_key,
                                    confirmation_key,
+                                   credential,
                                    commit,
                                    group_context,
                                    confirmed_transcript_hash_after,
@@ -180,10 +189,11 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(TranscriptTestVector,
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(TreeKEMTestVector,
                                    cipher_suite,
+                                   group_id,
                                    ratchet_tree_before,
                                    add_sender,
                                    my_leaf_secret,
-                                   my_key_package,
+                                   my_leaf_node,
                                    my_path_secret,
                                    update_sender,
                                    update_path,
@@ -196,8 +206,6 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(TreeKEMTestVector,
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(MessagesTestVector,
                                    key_package,
-                                   capabilities,
-                                   lifetime,
                                    ratchet_tree,
                                    group_info,
                                    group_secrets,

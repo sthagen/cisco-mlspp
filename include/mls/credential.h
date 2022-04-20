@@ -26,7 +26,6 @@ struct BasicCredential
   SignaturePublicKey public_key;
 
   TLS_SERIALIZABLE(identity, scheme, public_key)
-  TLS_TRAITS(tls::vector<2>, tls::pass, tls::pass)
 };
 
 struct X509Credential
@@ -36,12 +35,12 @@ struct X509Credential
     bytes data;
 
     TLS_SERIALIZABLE(data)
-    TLS_TRAITS(tls::vector<2>)
   };
 
   X509Credential() = default;
   explicit X509Credential(const std::vector<bytes>& der_chain_in);
 
+  SignatureScheme signature_scheme() const;
   SignaturePublicKey public_key() const;
 
   // TODO(rlb) This should be const or exposed via a method
@@ -50,8 +49,6 @@ struct X509Credential
 private:
   SignaturePublicKey _public_key;
   SignatureScheme _signature_scheme;
-
-  friend struct KeyPackage;
 };
 
 tls::ostream&

@@ -6,11 +6,14 @@ namespace mls {
 /// Constructors
 ///
 
+static const auto zero_ref =
+  LeafNodeRef{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
 State::State(bytes group_id,
              CipherSuite suite,
              const HPKEPrivateKey& init_priv,
              SignaturePrivateKey sig_priv,
-             const KeyPackage& key_package,
+             const LeafNode& leaf_node,
              ExtensionList extensions)
   : _suite(suite)
   , _group_id(std::move(group_id))
@@ -19,11 +22,21 @@ State::State(bytes group_id,
   , _transcript_hash(suite)
   , _extensions(std::move(extensions))
   , _index(0)
+  , _ref(zero_ref)
   , _identity_priv(std::move(sig_priv))
 {
-  auto index = _tree.add_leaf(key_package);
+  // Verify that the client supports the proposed group extensions
+  if (!leaf_node.verify_extension_support(_extensions)) {
+    throw InvalidParameterError("Client doesn't support required extensions");
+  }
+
+  _ref = leaf_node.ref(_suite);
+  _index = _tree.add_leaf(leaf_node);
   _tree.set_hash_all();
-  _tree_priv = TreeKEMPrivateKey::solo(suite, index, init_priv);
+  _tree_priv = TreeKEMPrivateKey::solo(suite, _index, init_priv);
+  if (!_tree_priv.consistent(_tree)) {
+    throw InvalidParameterError("LeafNode inconsistent with private key");
+  }
 
   // XXX(RLB): Convert KeyScheduleEpoch to take GroupContext?
   auto ctx = tls::marshal(group_context());
@@ -67,11 +80,12 @@ State::State(SignaturePrivateKey sig_priv,
   : _suite(pgs.cipher_suite)
   , _group_id(pgs.group_id)
   , _epoch(pgs.epoch)
-  , _tree(import_tree(pgs.tree_hash, tree, pgs.extensions))
+  , _tree(import_tree(pgs.tree_hash, tree, pgs.other_extensions))
   , _transcript_hash(pgs.cipher_suite)
-  , _extensions(pgs.extensions.for_group())
+  , _extensions(pgs.group_context_extensions)
   , _key_schedule(pgs.cipher_suite)
   , _index(0)
+  , _ref(zero_ref)
   , _identity_priv(std::move(sig_priv))
 {
   // Import the interim transcript hash
@@ -88,13 +102,16 @@ State::State(SignaturePrivateKey sig_priv,
 
 // Initialize a group from a Welcome
 State::State(const HPKEPrivateKey& init_priv,
+             HPKEPrivateKey leaf_priv,
              SignaturePrivateKey sig_priv,
              const KeyPackage& kp,
              const Welcome& welcome,
              const std::optional<TreeKEMPublicKey>& tree)
   : _suite(welcome.cipher_suite)
+  , _epoch(0)
   , _tree(welcome.cipher_suite)
   , _transcript_hash(welcome.cipher_suite)
+  , _ref(zero_ref)
   , _identity_priv(std::move(sig_priv))
 {
   auto maybe_kpi = welcome.find(kp);
@@ -109,17 +126,17 @@ State::State(const HPKEPrivateKey& init_priv,
 
   // Decrypt the GroupSecrets
   auto secrets_ct = welcome.secrets[kpi].encrypted_group_secrets;
-  auto secrets_data = init_priv.decrypt(kp.cipher_suite, {}, secrets_ct);
+  auto secrets_data = init_priv.decrypt(kp.cipher_suite, {}, {}, secrets_ct);
   auto secrets = tls::get<GroupSecrets>(secrets_data);
-  if (secrets.psks) {
+  if (!secrets.psks.psks.empty()) {
     throw NotImplementedError(/* PSKs are not supported */);
   }
 
   // Decrypt the GroupInfo
-  auto group_info = welcome.decrypt(secrets.joiner_secret, {});
+  auto group_info = welcome.decrypt(secrets.joiner_secret, { /* no PSKs */ });
 
   // Import the tree from the argument or from the extension
-  _tree = import_tree(group_info.tree_hash, tree, group_info.extensions);
+  _tree = import_tree(group_info.tree_hash, tree, group_info.other_extensions);
 
   // Verify the signature on the GroupInfo
   if (!group_info.verify(_tree)) {
@@ -133,29 +150,31 @@ State::State(const HPKEPrivateKey& init_priv,
   _transcript_hash.confirmed = group_info.confirmed_transcript_hash;
   _transcript_hash.update_interim(group_info.confirmation_tag);
 
-  _extensions = group_info.extensions.for_group();
+  _extensions = group_info.group_context_extensions;
 
   // Construct TreeKEM private key from partrs provided
-  auto maybe_index = _tree.find(kp);
+  auto maybe_index = _tree.find(kp.leaf_node);
   if (!maybe_index) {
     throw InvalidParameterError("New joiner not in tree");
   }
 
   _index = opt::get(maybe_index);
+  _ref = kp.leaf_node.ref(_suite);
 
-  auto ancestor = tree_math::ancestor(_index, group_info.signer_index);
+  auto signer_index = opt::get(_tree.find(group_info.signer));
+  auto ancestor = tree_math::ancestor(_index, signer_index);
   auto path_secret = std::optional<bytes>{};
   if (secrets.path_secret) {
     path_secret = opt::get(secrets.path_secret).secret;
   }
 
   _tree_priv = TreeKEMPrivateKey::joiner(
-    _suite, _tree.size(), _index, init_priv, ancestor, path_secret);
+    _suite, _tree.size(), _index, std::move(leaf_priv), ancestor, path_secret);
 
   // Ratchet forward into the current epoch
   auto group_ctx = tls::marshal(group_context());
-  _key_schedule =
-    KeyScheduleEpoch(_suite, secrets.joiner_secret, _suite.zero(), group_ctx);
+  _key_schedule = KeyScheduleEpoch(
+    _suite, secrets.joiner_secret, { /* no PSKs */ }, group_ctx);
   _keys = _key_schedule.encryption_keys(_tree.size());
 
   // Verify the confirmation
@@ -174,7 +193,7 @@ State::external_join(const bytes& leaf_secret,
 {
   auto initial_state = State(std::move(sig_priv), pgs, tree);
   auto add = initial_state.add_proposal(kp);
-  auto opts = CommitOpts{ { add }, false };
+  auto opts = CommitOpts{ { add }, false, false, {} };
   auto [commit_pt, welcome, state] =
     initial_state.commit(leaf_secret, opts, kp, pgs.external_pub);
   silence_unused(welcome);
@@ -188,8 +207,7 @@ State::external_join(const bytes& leaf_secret,
 MLSPlaintext
 State::sign(const Proposal& proposal) const
 {
-  auto sender = Sender{ SenderType::member, _index.val };
-  auto pt = MLSPlaintext{ _group_id, _epoch, sender, proposal };
+  auto pt = MLSPlaintext{ _group_id, _epoch, Sender{ _ref }, proposal };
   pt.sign(_suite, group_context(), _identity_priv);
   pt.membership_tag = { _key_schedule.membership_tag(group_context(), pt) };
   return pt;
@@ -205,12 +223,12 @@ State::add_proposal(const KeyPackage& key_package) const
 
   // Check that the group's basic properties are supported
   auto now = seconds_since_epoch();
-  if (!key_package.verify_expiry(now)) {
+  if (!key_package.leaf_node.verify_expiry(now)) {
     throw InvalidParameterError("Expired key package");
   }
 
   // Check that the group's extensions are supported
-  if (!key_package.verify_extension_support(_extensions)) {
+  if (!key_package.leaf_node.verify_extension_support(_extensions)) {
     throw InvalidParameterError(
       "Key package does not support group's extensions");
   }
@@ -219,15 +237,16 @@ State::add_proposal(const KeyPackage& key_package) const
 }
 
 Proposal
-State::update_proposal(const bytes& leaf_secret)
+State::update_proposal(const bytes& leaf_secret, const LeafNodeOptions& opts)
 {
-  // TODO(RLB) Allow changing the signing key
-  auto kp = opt::get(_tree.key_package(_index));
-  kp.init_key = HPKEPrivateKey::derive(_suite, leaf_secret).public_key;
-  kp.sign(_identity_priv, std::nullopt);
+  auto leaf = opt::get(_tree.leaf_node(_index));
 
-  _update_secrets[kp.hash()] = leaf_secret;
-  return { Update{ kp } };
+  auto public_key = HPKEPrivateKey::derive(_suite, leaf_secret).public_key;
+  auto new_leaf =
+    leaf.for_update(_suite, _group_id, public_key, opts, _identity_priv);
+
+  _update_secrets[new_leaf.ref(_suite)] = leaf_secret;
+  return { Update{ new_leaf } };
 }
 
 Proposal
@@ -237,13 +256,23 @@ State::remove_proposal(RosterIndex index) const
 }
 
 Proposal
-State::remove_proposal(LeafIndex removed) const
+State::remove_proposal(LeafNodeRef removed) const
 {
-  if (!_tree.key_package(removed)) {
+  if (!_tree.find(removed)) {
     throw InvalidParameterError("Remove on blank leaf");
   }
 
   return { Remove{ removed } };
+}
+
+Proposal
+State::group_context_extensions_proposal(ExtensionList exts) const
+{
+  if (!extensions_supported(exts)) {
+    throw InvalidParameterError("Unsupported extensions");
+  }
+
+  return { GroupContextExtensions{ std::move(exts) } };
 }
 
 MLSPlaintext
@@ -253,9 +282,9 @@ State::add(const KeyPackage& key_package) const
 }
 
 MLSPlaintext
-State::update(const bytes& leaf_secret)
+State::update(const bytes& leaf_secret, const LeafNodeOptions& opts)
 {
-  return sign(update_proposal(leaf_secret));
+  return sign(update_proposal(leaf_secret, opts));
 }
 
 MLSPlaintext
@@ -265,9 +294,15 @@ State::remove(RosterIndex index) const
 }
 
 MLSPlaintext
-State::remove(LeafIndex removed) const
+State::remove(LeafNodeRef removed) const
 {
   return sign(remove_proposal(removed));
+}
+
+MLSPlaintext
+State::group_context_extensions(ExtensionList exts) const
+{
+  return sign(group_context_extensions_proposal(std::move(exts)));
 }
 
 std::tuple<MLSPlaintext, Welcome, State>
@@ -296,7 +331,7 @@ State::commit(const bytes& leaf_secret,
       joiners.push_back(add.key_package);
     }
 
-    commit.proposals.push_back({ ProposalRef{ cached.ref } });
+    commit.proposals.push_back({ cached.ref });
   }
 
   // Add the extra proposals to those we had cached
@@ -332,24 +367,25 @@ State::commit(const bytes& leaf_secret,
   auto [has_updates, has_removes, joiner_locations] = next.apply(proposals);
 
   // If this is an external commit, see where the new joiner ended up
-  auto sender = Sender{ SenderType::member, _index.val };
+  auto sender = Sender{ _ref };
   if (external_commit) {
-    auto it =
-      std::find(joiners.begin(), joiners.end(), opt::get(joiner_key_package));
+    const auto& kp = opt::get(joiner_key_package);
+    const auto it = std::find(joiners.begin(), joiners.end(), kp);
     if (it == joiners.end()) {
       throw InvalidParameterError("Joiner not added");
     }
 
-    auto pos = it - joiners.begin();
+    const auto pos = it - joiners.begin();
     next._index = joiner_locations[pos];
-    sender = Sender{ SenderType::external_joiner, next._index.val };
+    next._ref = kp.leaf_node.ref(next._suite);
+    sender = Sender{ NewMemberID{} };
   }
 
   // KEM new entropy to the group and the new joiners
   auto no_proposals = commit.proposals.empty();
   auto path_required =
     has_updates || has_removes || no_proposals || external_commit;
-  auto update_secret = _suite.zero();
+  auto commit_secret = _suite.zero();
   auto path_secrets =
     std::vector<std::optional<bytes>>(joiner_locations.size());
   if (path_required) {
@@ -360,15 +396,23 @@ State::commit(const bytes& leaf_secret,
       next._transcript_hash.confirmed,
       next._extensions,
     });
+
+    auto leaf_node_opts = LeafNodeOptions{};
+    if (opts) {
+      leaf_node_opts = opt::get(opts).leaf_node_opts;
+    }
+
     auto [new_priv, path] = next._tree.encap(next._index,
+                                             next._group_id,
                                              ctx,
                                              leaf_secret,
                                              _identity_priv,
                                              joiner_locations,
-                                             std::nullopt);
+                                             leaf_node_opts);
     next._tree_priv = new_priv;
+    next._ref = path.leaf_node.ref(_suite);
     commit.path = path;
-    update_secret = new_priv.update_secret;
+    commit_secret = new_priv.update_secret;
 
     for (size_t i = 0; i < joiner_locations.size(); i++) {
       auto [overlap, shared_path_secret, ok] =
@@ -381,22 +425,33 @@ State::commit(const bytes& leaf_secret,
   }
 
   // Create the Commit message and advance the transcripts / key schedule
-  auto pt = next.ratchet_and_sign(
-    sender, commit, update_secret, force_init_secret, group_context());
+  auto encrypt_handshake = opts && opt::get(opts).encrypt_handshake;
+  auto pt = next.ratchet_and_sign(sender,
+                                  commit,
+                                  commit_secret,
+                                  { /* no PSKs */ },
+                                  force_init_secret,
+                                  encrypt_handshake,
+                                  group_context());
 
   // Complete the GroupInfo and form the Welcome
   auto group_info = GroupInfo{
-    next._group_id,         next._epoch,
-    next._tree.root_hash(), next._transcript_hash.confirmed,
-    next._extensions,       opt::get(pt.confirmation_tag),
+    next._group_id,
+    next._epoch,
+    next._tree.root_hash(),
+    next._transcript_hash.confirmed,
+    next._extensions,
+    { /* No other extensions */ },
+    opt::get(pt.confirmation_tag),
   };
   if (opts && opt::get(opts).inline_tree) {
-    group_info.extensions.add(RatchetTreeExtension{ next._tree });
+    group_info.other_extensions.add(RatchetTreeExtension{ next._tree });
   }
-  group_info.sign(next._tree, next._index, next._identity_priv);
+  group_info.sign(next._tree, next._ref, next._identity_priv);
 
-  auto welcome =
-    Welcome{ _suite, next._key_schedule.joiner_secret, {}, group_info };
+  auto welcome = Welcome{
+    _suite, next._key_schedule.joiner_secret, { /* no PSKs */ }, group_info
+  };
   for (size_t i = 0; i < joiners.size(); i++) {
     welcome.encrypt(joiners[i], path_secrets[i]);
   }
@@ -420,18 +475,23 @@ State::group_context() const
 MLSPlaintext
 State::ratchet_and_sign(const Sender& sender,
                         const Commit& op,
-                        const bytes& update_secret,
+                        const bytes& commit_secret,
+                        const std::vector<PSKWithSecret>& psks,
                         const std::optional<bytes>& force_init_secret,
+                        bool encrypt_handshake,
                         const GroupContext& prev_ctx)
 {
   auto prev_key_schedule = _key_schedule;
 
   auto pt = MLSPlaintext{ _group_id, _epoch, sender, op };
+  if (encrypt_handshake) {
+    pt.wire_format = WireFormat::mls_ciphertext;
+  }
   pt.sign(_suite, prev_ctx, _identity_priv);
 
   _transcript_hash.update_confirmed(pt);
   _epoch += 1;
-  update_epoch_secrets(update_secret, force_init_secret);
+  update_epoch_secrets(commit_secret, psks, force_init_secret);
 
   pt.confirmation_tag = { _key_schedule.confirmation_tag(
     _transcript_hash.confirmed) };
@@ -468,16 +528,23 @@ State::handle(const MLSPlaintext& pt)
     throw InvalidParameterError("Incorrect content type");
   }
 
-  switch (pt.sender.sender_type) {
+  switch (pt.sender.sender_type()) {
     case SenderType::member:
-    case SenderType::external_joiner:
+    case SenderType::new_member:
       break;
 
     default:
-      throw ProtocolError("Commit be either member or external_joiner");
+      throw ProtocolError("Commit must be either member or new_member");
   }
 
-  auto sender = LeafIndex(pt.sender.sender);
+  auto sender = std::optional<LeafIndex>();
+  if (pt.sender.sender_type() == SenderType::member) {
+    const auto& sender_ref = var::get<LeafNodeRef>(pt.sender.sender);
+    // This optional is guaranteed to be present because we just did this same
+    // lookup for signature verification.
+    sender = opt::get(_tree.find(sender_ref));
+  }
+
   if (sender == _index) {
     throw InvalidParameterError("Handle own commits with caching");
   }
@@ -491,29 +558,62 @@ State::handle(const MLSPlaintext& pt)
   silence_unused(_has_updates);
   silence_unused(_has_removes);
 
-  // If this is an external Commit, then it must have an ExternalInit proposal
+  // If this is an external Commit, then its direct proposals must meet certain
+  // constraints, and we need to identify the sender's location in the new tree.
   auto force_init_secret = std::optional<bytes>{};
-  if (pt.sender.sender_type == SenderType::external_joiner) {
-    auto pos =
-      std::find_if(proposals.begin(), proposals.end(), [&](auto&& cached) {
-        return var::holds_alternative<ExternalInit>(cached.proposal.content);
-      });
-    if (pos == proposals.end()) {
-      throw ProtocolError("External commit without ExternalInit");
+  auto sender_location = LeafIndex{ 0 };
+  if (sender) {
+    sender_location = opt::get(sender);
+  }
+
+  if (pt.sender.sender_type() == SenderType::new_member) {
+    // Extract the forced init secret
+    auto kem_output = commit.valid_external();
+    if (!kem_output) {
+      throw ProtocolError("Invalid external commit");
     }
 
-    const auto& enc = var::get<ExternalInit>(pos->proposal.content).kem_output;
-    force_init_secret = _key_schedule.receive_external_init(enc);
+    force_init_secret =
+      _key_schedule.receive_external_init(opt::get(kem_output));
+
+    // Figure out where the new joiner was added by identifying the Add by value
+    // in the proposals vector
+    auto add_index = size_t(0);
+    for (size_t i = 0; i < commit.proposals.size(); i++) {
+      if (proposals[i].proposal.proposal_type() != ProposalType::add) {
+        continue;
+      }
+
+      if (var::holds_alternative<ProposalRef>(commit.proposals[i].content)) {
+        add_index += 1;
+      } else {
+        sender_location = joiner_locations[add_index];
+        break;
+      }
+
+      if (i == commit.proposals.size() - 1) {
+        // If we make it to the end of the loop, we're missing a sender location
+        throw ProtocolError("Unable to locate external joiner");
+      }
+    }
   }
 
   // Decapsulate and apply the UpdatePath, if provided
   // TODO(RLB) Verify that path is provided if required
-  auto update_secret = _suite.zero();
+  auto commit_secret = _suite.zero();
   if (commit.path) {
     const auto& path = opt::get(commit.path);
-    if (!next._tree.parent_hash_valid(sender, path)) {
+
+    if (path.leaf_node.source() != LeafNodeSource::commit) {
+      throw ProtocolError("Commit path leaf node has invalid source");
+    }
+
+    if (!next._tree.parent_hash_valid(sender_location, path)) {
       throw ProtocolError("Commit path has invalid parent hash");
     }
+
+    next.check_update_leaf_node(
+      sender_location, path.leaf_node, LeafNodeSource::commit);
 
     auto ctx = tls::marshal(GroupContext{
       next._group_id,
@@ -522,15 +622,17 @@ State::handle(const MLSPlaintext& pt)
       next._transcript_hash.confirmed,
       next._extensions,
     });
-    next._tree_priv.decap(sender, next._tree, ctx, path, joiner_locations);
-    next._tree.merge(sender, path);
-    update_secret = next._tree_priv.update_secret;
+    next._tree_priv.decap(
+      sender_location, next._tree, ctx, path, joiner_locations);
+    next._tree.merge(sender_location, path);
+    commit_secret = next._tree_priv.update_secret;
   }
 
   // Update the transcripts and advance the key schedule
   next._transcript_hash.update(pt);
   next._epoch += 1;
-  next.update_epoch_secrets(update_secret, force_init_secret);
+  next.update_epoch_secrets(
+    commit_secret, { /* no PSKs */ }, force_init_secret);
 
   // Verify the confirmation MAC
   if (!pt.confirmation_tag) {
@@ -544,43 +646,138 @@ State::handle(const MLSPlaintext& pt)
   return next;
 }
 
+// A LeafNode in an Add KeyPackage must not have the same leaf_node.public_key
+// or signature_key as any KeyPackage for a current member.
+void
+State::check_add_leaf_node(const LeafNode& leaf,
+                           std::optional<LeafIndex> except) const
+{
+  for (LeafIndex i{ 0 }; i < _tree.size(); i.val++) {
+    if (i == except) {
+      continue;
+    }
+
+    const auto maybe_tree_leaf = _tree.leaf_node(i);
+    if (!maybe_tree_leaf) {
+      continue;
+    }
+
+    const auto& tree_leaf = opt::get(maybe_tree_leaf);
+    const auto hpke_key_eq = tree_leaf.public_key == leaf.public_key;
+    const auto sig_key_eq =
+      tree_leaf.credential.public_key() == leaf.credential.public_key();
+    if (hpke_key_eq || sig_key_eq) {
+      throw ProtocolError("Duplicate parameters in new KeyPackage");
+    }
+  }
+}
+
+// A KeyPackage in an Update must meet the same uniqueness criteria as for an
+// Add, except with regard to the KeyPackage it replaces.
+void
+State::check_update_leaf_node(LeafIndex target,
+                              const LeafNode& leaf,
+                              LeafNodeSource required_source) const
+{
+  check_add_leaf_node(leaf, target);
+
+  if (leaf.source() != required_source) {
+    throw ProtocolError("LeafNode in Update has incorrect LeafNodeSource");
+  }
+
+  const auto maybe_tree_leaf = _tree.leaf_node(target);
+  if (!maybe_tree_leaf) {
+    return;
+  }
+
+  const auto& tree_leaf = opt::get(maybe_tree_leaf);
+  if (tree_leaf.public_key == leaf.public_key) {
+    throw ProtocolError("Update without a fresh init key");
+  }
+}
+
 LeafIndex
 State::apply(const Add& add)
 {
-  return _tree.add_leaf(add.key_package);
+  check_add_leaf_node(add.key_package.leaf_node, std::nullopt);
+  return _tree.add_leaf(add.key_package.leaf_node);
 }
 
 void
 State::apply(LeafIndex target, const Update& update)
 {
-  _tree.update_leaf(target, update.key_package);
+  check_update_leaf_node(target, update.leaf_node, LeafNodeSource::update);
+  _tree.update_leaf(target, update.leaf_node);
 }
 
 void
 State::apply(LeafIndex target, const Update& update, const bytes& leaf_secret)
 {
-  _tree.update_leaf(target, update.key_package);
+  _tree.update_leaf(target, update.leaf_node);
   _tree_priv.set_leaf_secret(leaf_secret);
 }
 
-void
+LeafIndex
 State::apply(const Remove& remove)
 {
-  _tree.blank_path(remove.removed);
+  auto maybe_removed = _tree.find(remove.removed);
+  if (!maybe_removed) {
+    throw ProtocolError("Attempt to remove non-member");
+  }
+
+  auto removed = opt::get(maybe_removed);
+  _tree.blank_path(removed);
+  return removed;
+}
+
+void
+State::apply(const GroupContextExtensions& gce)
+{
+  // TODO(RLB): Update spec to clarify that you MUST verify that the new
+  // extensions are compatible with all members.
+  if (!extensions_supported(gce.group_context_extensions)) {
+    throw ProtocolError("Unsupported extensions in GroupContextExtensions");
+  }
+
+  _extensions = gce.group_context_extensions;
+}
+
+bool
+State::extensions_supported(const ExtensionList& exts) const
+{
+  for (LeafIndex i{ 0 }; i < _tree.size(); i.val++) {
+    const auto& maybe_leaf = _tree.leaf_node(i);
+    if (!maybe_leaf) {
+      continue;
+    }
+
+    const auto& leaf = opt::get(maybe_leaf);
+    if (!leaf.verify_extension_support(exts)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 void
 State::cache_proposal(const MLSPlaintext& pt)
 {
+  auto sender_location = std::optional<LeafIndex>();
+  if (pt.sender.sender_type() == SenderType::member) {
+    sender_location = _tree.find(var::get<LeafNodeRef>(pt.sender.sender));
+  }
+
   _pending_proposals.push_back({
-    _suite.digest().hash(tls::marshal(pt)),
+    _suite.ref(pt),
     var::get<Proposal>(pt.content),
-    LeafIndex{ pt.sender.sender },
+    sender_location,
   });
 }
 
 std::optional<State::CachedProposal>
-State::resolve(const ProposalOrRef& id, LeafIndex sender_index) const
+State::resolve(const ProposalOrRef& id,
+               std::optional<LeafIndex> sender_index) const
 {
   if (var::holds_alternative<Proposal>(id.content)) {
     return CachedProposal{
@@ -592,7 +789,7 @@ State::resolve(const ProposalOrRef& id, LeafIndex sender_index) const
 
   const auto& ref = var::get<ProposalRef>(id.content);
   for (const auto& cached : _pending_proposals) {
-    if (cached.ref == ref.id) {
+    if (cached.ref == ref) {
       return cached;
     }
   }
@@ -602,7 +799,7 @@ State::resolve(const ProposalOrRef& id, LeafIndex sender_index) const
 
 std::vector<State::CachedProposal>
 State::must_resolve(const std::vector<ProposalOrRef>& ids,
-                    LeafIndex sender_index) const
+                    std::optional<LeafIndex> sender_index) const
 {
   auto proposals = std::vector<CachedProposal>(ids.size());
   auto must_resolve = [&](auto& id) {
@@ -614,7 +811,7 @@ State::must_resolve(const std::vector<ProposalOrRef>& ids,
 
 std::vector<LeafIndex>
 State::apply(const std::vector<CachedProposal>& proposals,
-             ProposalType required_type)
+             Proposal::Type required_type)
 {
   auto locations = std::vector<LeafIndex>{};
   for (const auto& cached : proposals) {
@@ -631,30 +828,42 @@ State::apply(const std::vector<CachedProposal>& proposals,
 
       case ProposalType::update: {
         const auto& update = var::get<Update>(cached.proposal.content);
-        if (cached.sender != _index) {
-          apply(cached.sender, update);
+
+        if (!cached.sender) {
+          throw ProtocolError("Update without target leaf");
+        }
+
+        auto target = opt::get(cached.sender);
+        if (target != _index) {
+          apply(target, update);
           break;
         }
 
-        auto kp_hash = update.key_package.hash();
-        if (_update_secrets.count(kp_hash) == 0) {
+        const auto ref = update.leaf_node.ref(_suite);
+        if (_update_secrets.count(ref) == 0) {
           throw ProtocolError("Self-update with no cached secret");
         }
 
-        apply(cached.sender, update, _update_secrets[cached.ref]);
-        locations.push_back(cached.sender);
+        apply(target, update, _update_secrets[cached.ref]);
+        locations.push_back(target);
         break;
       }
 
       case ProposalType::remove: {
         const auto& remove = var::get<Remove>(cached.proposal.content);
-        apply(remove);
-        locations.push_back(remove.removed);
+        locations.push_back(apply(remove));
+        break;
+      }
+
+      case ProposalType::group_context_extensions: {
+        const auto& gce =
+          var::get<GroupContextExtensions>(cached.proposal.content);
+        apply(gce);
         break;
       }
 
       default:
-        throw ProtocolError("Unknown proposal type");
+        throw ProtocolError("Unsupported proposal type");
     }
   }
 
@@ -667,6 +876,9 @@ State::apply(const std::vector<CachedProposal>& proposals)
   auto update_locations = apply(proposals, ProposalType::update);
   auto remove_locations = apply(proposals, ProposalType::remove);
   auto joiner_locations = apply(proposals, ProposalType::add);
+  apply(proposals, ProposalType::group_context_extensions);
+
+  // TODO(RLB) Check for unknown / unhandled proposal types.
 
   auto has_updates = !update_locations.empty();
   auto has_removes = !remove_locations.empty();
@@ -684,8 +896,8 @@ State::apply(const std::vector<CachedProposal>& proposals)
 MLSCiphertext
 State::protect(const bytes& pt)
 {
-  auto sender = Sender{ SenderType::member, _index.val };
-  MLSPlaintext mpt{ _group_id, _epoch, sender, ApplicationData{ pt } };
+  MLSPlaintext mpt{ _group_id, _epoch, Sender{ _ref }, ApplicationData{ pt } };
+  mpt.wire_format = WireFormat::mls_ciphertext;
   mpt.sign(_suite, group_context(), _identity_priv);
   mpt.membership_tag = { _key_schedule.membership_tag(group_context(), mpt) };
   return encrypt(mpt);
@@ -721,8 +933,10 @@ operator==(const State& lhs, const State& rhs)
   auto tree = (lhs._tree == rhs._tree);
   auto transcript_hash = (lhs._transcript_hash == rhs._transcript_hash);
   auto key_schedule = (lhs._key_schedule == rhs._key_schedule);
+  auto extensions = (lhs._extensions == rhs._extensions);
 
-  return suite && group_id && epoch && tree && transcript_hash && key_schedule;
+  return suite && group_id && epoch && tree && transcript_hash &&
+         key_schedule && extensions;
 }
 
 bool
@@ -733,6 +947,7 @@ operator!=(const State& lhs, const State& rhs)
 
 void
 State::update_epoch_secrets(const bytes& commit_secret,
+                            const std::vector<PSKWithSecret>& psks,
                             const std::optional<bytes>& force_init_secret)
 {
   auto ctx = tls::marshal(GroupContext{
@@ -743,7 +958,7 @@ State::update_epoch_secrets(const bytes& commit_secret,
     _extensions,
   });
   _key_schedule =
-    _key_schedule.next(commit_secret, _suite.zero(), force_init_secret, ctx);
+    _key_schedule.next(commit_secret, psks, force_init_secret, ctx);
   _keys = _key_schedule.encryption_keys(_tree.size());
 }
 
@@ -754,7 +969,7 @@ State::update_epoch_secrets(const bytes& commit_secret,
 bool
 State::verify_internal(const MLSPlaintext& pt) const
 {
-  if (pt.sender.sender_type != SenderType::member) {
+  if (pt.sender.sender_type() != SenderType::member) {
     // TODO(RLB) Support external senders
     throw InvalidParameterError("External senders not supported");
   }
@@ -764,43 +979,55 @@ State::verify_internal(const MLSPlaintext& pt) const
     return false;
   }
 
-  auto maybe_kp = _tree.key_package(LeafIndex(pt.sender.sender));
-  if (!maybe_kp) {
+  auto sender_ref = var::get<LeafNodeRef>(pt.sender.sender);
+  auto maybe_leaf = _tree.leaf_node(sender_ref);
+  if (!maybe_leaf) {
     throw InvalidParameterError("Signature from blank node");
   }
 
-  const auto& pub = opt::get(maybe_kp).credential.public_key();
+  const auto& pub = opt::get(maybe_leaf).credential.public_key();
   return pt.verify(_suite, group_context(), pub);
 }
 
 bool
-State::verify_external_commit(const MLSPlaintext& pt) const
+State::verify_new_member(const MLSPlaintext& pt) const
 {
-  // Content type MUST be commit
-  if (!var::holds_alternative<Commit>(pt.content)) {
-    throw ProtocolError("External Commit does not hold a commit");
-  }
+  const auto& pub = var::visit(
+    overloaded{
+      [](const Commit& commit) {
+        if (!commit.path) {
+          throw ProtocolError("External Commit does not have a path");
+        }
 
-  const auto& commit = var::get<Commit>(pt.content);
-  if (!commit.path) {
-    throw ProtocolError("External Commit does not have a path");
-  }
+        // Verify with public key from update path leaf key package
+        const auto& leaf = opt::get(commit.path).leaf_node;
+        return leaf.credential.public_key();
+      },
+      [](const Proposal& proposal) {
+        if (proposal.proposal_type() != ProposalType::add) {
+          throw ProtocolError("New member proposal is not an Add");
+        }
 
-  // Verify with public key from update path leaf key package
-  const auto& kp = opt::get(commit.path).leaf_key_package;
-  const auto& pub = kp.credential.public_key();
+        const auto& add = var::get<Add>(proposal.content);
+        return add.key_package.leaf_node.credential.public_key();
+      },
+      [](const ApplicationData& /*unused*/) -> SignaturePublicKey {
+        throw ProtocolError("New member message of unknown type");
+      },
+    },
+    pt.content);
   return pt.verify(_suite, group_context(), pub);
 }
 
 bool
 State::verify(const MLSPlaintext& pt) const
 {
-  switch (pt.sender.sender_type) {
+  switch (pt.sender.sender_type()) {
     case SenderType::member:
       return verify_internal(pt);
 
-    case SenderType::external_joiner:
-      return verify_external_commit(pt);
+    case SenderType::new_member:
+      return verify_new_member(pt);
 
     default:
       // TODO(RLB) Support other sender types
@@ -833,30 +1060,31 @@ State::public_group_state() const
     _tree.root_hash(),
     _transcript_hash.interim,
     _extensions,
+    { /* No other extensions */ },
     _key_schedule.external_priv.public_key,
   };
-  pgs.extensions.add(RatchetTreeExtension{ _tree });
-  pgs.sign(_tree, _index, _identity_priv);
+  pgs.other_extensions.add(RatchetTreeExtension{ _tree });
+  pgs.sign(_tree, _ref, _identity_priv);
   return pgs;
 }
 
-std::vector<KeyPackage>
+std::vector<LeafNode>
 State::roster() const
 {
-  auto kps = std::vector<KeyPackage>(_tree.size().val);
+  auto leaves = std::vector<LeafNode>(_tree.size().val);
   auto leaf_count = uint32_t(0);
 
   for (uint32_t i = 0; i < _tree.size().val; i++) {
-    const auto& kp = _tree.key_package(LeafIndex{ i });
-    if (!kp) {
+    const auto& maybe_leaf = _tree.leaf_node(LeafIndex{ i });
+    if (!maybe_leaf) {
       continue;
     }
-    kps.at(leaf_count) = opt::get(kp);
+    leaves.at(leaf_count) = opt::get(maybe_leaf);
     leaf_count++;
   }
 
-  kps.resize(leaf_count);
-  return kps;
+  leaves.resize(leaf_count);
+  return leaves;
 }
 
 bytes
@@ -868,12 +1096,35 @@ State::authentication_secret() const
 MLSCiphertext
 State::encrypt(const MLSPlaintext& pt)
 {
-  return _keys.encrypt(_index, _key_schedule.sender_data_secret, pt);
+  if (pt.sender.sender != _ref) {
+    throw InvalidParameterError("Cannot encrypt a plaintext from someone else");
+  }
+
+  if (pt.wire_format == WireFormat::mls_ciphertext) {
+    return _keys.encrypt(_tree, _index, _key_schedule.sender_data_secret, pt);
+  }
+
+  // If a plaintext has been created without the prior intent to encrypt it,
+  // then it needs to be re-signed.
+  //
+  // XXX(RLB): This is currently true for all MLSPlaintexts generated with the
+  // X_proposal() methods.  There is a trade-off here between API decoupling
+  // (when do you need to know you're going to encrypt?) and the work of
+  // re-signing.
+  auto pt_copy = pt;
+  pt_copy.wire_format = WireFormat::mls_ciphertext;
+  pt_copy.sign(_suite, group_context(), _identity_priv);
+  return _keys.encrypt(
+    _tree, _index, _key_schedule.sender_data_secret, pt_copy);
 }
 
 MLSPlaintext
 State::decrypt(const MLSCiphertext& ct)
 {
+  if (ct.wire_format != WireFormat::mls_ciphertext) {
+    throw InvalidParameterError("Invalid wire format for MLSCiphertext");
+  }
+
   // Verify the epoch
   if (ct.group_id != _group_id) {
     throw InvalidParameterError("Ciphertext not from this group");
@@ -883,21 +1134,21 @@ State::decrypt(const MLSCiphertext& ct)
     throw InvalidParameterError("Ciphertext not from this epoch");
   }
 
-  return _keys.decrypt(_key_schedule.sender_data_secret, ct);
+  return _keys.decrypt(_tree, _key_schedule.sender_data_secret, ct);
 }
 
-LeafIndex
+LeafNodeRef
 State::leaf_for_roster_entry(RosterIndex index) const
 {
   auto non_blank_leaves = uint32_t(0);
 
   for (auto i = LeafIndex{ 0 }; i < _tree.size(); i.val++) {
-    const auto& kp = _tree.key_package(i);
-    if (!kp) {
+    const auto& maybe_leaf = _tree.leaf_node(i);
+    if (!maybe_leaf) {
       continue;
     }
     if (non_blank_leaves == index.val) {
-      return i;
+      return opt::get(maybe_leaf).ref(_suite);
     }
     non_blank_leaves += 1;
   }
