@@ -70,6 +70,7 @@ Client::begin_session(const bytes& group_id) const
   auto leaf_priv = HPKEPrivateKey::generate(suite);
   auto leaf_node = LeafNode(suite,
                             leaf_priv.public_key,
+                            sig_priv.public_key,
                             cred,
                             Capabilities::create_default(),
                             Lifetime::create_default(),
@@ -100,6 +101,7 @@ PendingJoin::Inner::Inner(CipherSuite suite_in,
                 init_priv.public_key,
                 LeafNode(suite,
                          leaf_priv.public_key,
+                         sig_priv.public_key,
                          std::move(cred_in),
                          Capabilities::create_default(),
                          Lifetime::create_default(),
@@ -274,14 +276,6 @@ Session::remove(uint32_t index)
   return tls::marshal(proposal);
 }
 
-bytes
-Session::remove(const LeafNodeRef& ref)
-{
-  auto proposal =
-    inner->history.front().remove(ref, { inner->encrypt_handshake, {}, 0 });
-  return tls::marshal(proposal);
-}
-
 std::tuple<bytes, bytes>
 Session::commit(const bytes& proposal)
 {
@@ -344,12 +338,6 @@ epoch_t
 Session::epoch() const
 {
   return inner->history.front().epoch();
-}
-
-LeafNodeRef
-Session::ref() const
-{
-  return inner->history.front().ref();
 }
 
 LeafIndex

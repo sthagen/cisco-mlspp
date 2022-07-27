@@ -10,28 +10,6 @@
 
 namespace mls {
 
-// struct {
-//     opaque group_id<0..255>;
-//     uint64 epoch;
-//     opaque tree_hash<0..255>;
-//     opaque confirmed_transcript_hash<0..255>;
-//     Extension extensions<0..2^16-1>;
-// } GroupContext;
-struct GroupContext
-{
-  bytes group_id;
-  epoch_t epoch;
-  bytes tree_hash;
-  bytes confirmed_transcript_hash;
-  ExtensionList extensions;
-
-  TLS_SERIALIZABLE(group_id,
-                   epoch,
-                   tree_hash,
-                   confirmed_transcript_hash,
-                   extensions)
-};
-
 // Index into the session roster
 struct RosterIndex : public UInt32
 {
@@ -87,6 +65,12 @@ public:
     const std::optional<TreeKEMPublicKey>& tree,
     const MessageOpts& msg_opts);
 
+  // Propose that a new member be added a group
+  static MLSMessage new_member_add(const bytes& group_id,
+                                   epoch_t epoch,
+                                   const KeyPackage& new_member,
+                                   const SignaturePrivateKey& sig_priv);
+
   ///
   /// Message factories
   ///
@@ -95,7 +79,7 @@ public:
   Proposal update_proposal(const bytes& leaf_secret,
                            const LeafNodeOptions& opts);
   Proposal remove_proposal(RosterIndex index) const;
-  Proposal remove_proposal(LeafNodeRef removed) const;
+  Proposal remove_proposal(LeafIndex removed) const;
   Proposal group_context_extensions_proposal(ExtensionList exts) const;
 
   MLSMessage add(const KeyPackage& key_package, const MessageOpts& msg_opts);
@@ -103,7 +87,7 @@ public:
                     const LeafNodeOptions& opts,
                     const MessageOpts& msg_opts);
   MLSMessage remove(RosterIndex index, const MessageOpts& msg_opts);
-  MLSMessage remove(LeafNodeRef removed, const MessageOpts& msg_opts);
+  MLSMessage remove(LeafIndex removed, const MessageOpts& msg_opts);
   MLSMessage group_context_extensions(ExtensionList exts,
                                       const MessageOpts& msg_opts);
 
@@ -123,7 +107,6 @@ public:
   /// Accessors
   ///
   epoch_t epoch() const { return _epoch; }
-  LeafNodeRef ref() const { return _ref; }
   LeafIndex index() const { return _index; }
   CipherSuite cipher_suite() const { return _suite; }
   const ExtensionList& extensions() const { return _extensions; }
@@ -167,7 +150,6 @@ protected:
 
   // Per-participant state
   LeafIndex _index;
-  LeafNodeRef _ref;
   SignaturePrivateKey _identity_priv;
 
   // Cache of Proposals and update secrets
@@ -178,7 +160,13 @@ protected:
     std::optional<LeafIndex> sender;
   };
   std::list<CachedProposal> _pending_proposals;
-  std::map<LeafNodeRef, bytes> _update_secrets;
+
+  struct CachedUpdate
+  {
+    bytes update_secret;
+    Update proposal;
+  };
+  std::optional<CachedUpdate> _cached_update;
 
   // Assemble a preliminary, unjoined group state
   State(SignaturePrivateKey sig_priv,
@@ -199,17 +187,18 @@ protected:
 
   // Create an MLSMessage encapsulating some content
   template<typename Inner>
-  MLSMessageContentAuth sign(const Sender& sender,
-                             Inner&& content,
-                             const bytes& authenticated_data,
-                             bool encrypt) const;
+  MLSAuthenticatedContent sign(const Sender& sender,
+                               Inner&& content,
+                               const bytes& authenticated_data,
+                               bool encrypt) const;
 
-  MLSMessage protect(MLSMessageContentAuth&& content_auth, size_t padding_size);
+  MLSMessage protect(MLSAuthenticatedContent&& content_auth,
+                     size_t padding_size);
 
   template<typename Inner>
   MLSMessage protect_full(Inner&& content, const MessageOpts& msg_opts);
 
-  MLSMessageContentAuth unprotect_to_content_auth(const MLSMessage& msg);
+  MLSAuthenticatedContent unprotect_to_content_auth(const MLSMessage& msg);
 
   // Apply the changes requested by various messages
   void check_add_leaf_node(const LeafNode& leaf,
@@ -232,7 +221,7 @@ protected:
   bool extensions_supported(const ExtensionList& exts) const;
 
   // Extract a proposal from the cache
-  void cache_proposal(MLSMessageContentAuth content_auth);
+  void cache_proposal(MLSAuthenticatedContent content_auth);
   std::optional<CachedProposal> resolve(
     const ProposalOrRef& id,
     std::optional<LeafIndex> sender_index) const;
@@ -250,12 +239,16 @@ protected:
                             const std::optional<bytes>& force_init_secret);
 
   // Signature verification over a handshake message
-  bool verify_internal(const MLSMessageContentAuth& content_auth) const;
-  bool verify_new_member(const MLSMessageContentAuth& content_auth) const;
-  bool verify(const MLSMessageContentAuth& content_auth) const;
+  bool verify_internal(const MLSAuthenticatedContent& content_auth) const;
+  bool verify_external(const MLSAuthenticatedContent& content_auth) const;
+  bool verify_new_member_proposal(
+    const MLSAuthenticatedContent& content_auth) const;
+  bool verify_new_member_commit(
+    const MLSAuthenticatedContent& content_auth) const;
+  bool verify(const MLSAuthenticatedContent& content_auth) const;
 
-  // Convert a Roster entry into LeafNodeRef
-  LeafNodeRef leaf_for_roster_entry(RosterIndex index) const;
+  // Convert a Roster entry into LeafIndex
+  LeafIndex leaf_for_roster_entry(RosterIndex index) const;
 
   // Create a draft successor state
   State successor() const;

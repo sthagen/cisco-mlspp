@@ -25,8 +25,9 @@ remove_leaves(std::vector<NodeIndex>& res, const std::vector<LeafIndex>& except)
 const HPKEPublicKey&
 Node::public_key() const
 {
-  static const auto get_key = [](const auto& n) -> const HPKEPublicKey& {
-    return n.public_key;
+  const auto get_key = overloaded{
+    [](const LeafNode& n) -> const HPKEPublicKey& { return n.encryption_key; },
+    [](const ParentNode& n) -> const HPKEPublicKey& { return n.public_key; },
   };
   return var::visit(get_key, node);
 }
@@ -568,18 +569,18 @@ TreeKEMPublicKey::resolve(NodeIndex index) const // NOLINT(misc-no-recursion)
   return l;
 }
 
-std::optional<LeafIndex>
-TreeKEMPublicKey::find(const LeafNode& leaf) const
+bool
+TreeKEMPublicKey::has_leaf(LeafIndex index) const
 {
-  return find(leaf.ref(suite));
+  return !node_at(index).blank();
 }
 
 std::optional<LeafIndex>
-TreeKEMPublicKey::find(const LeafNodeRef& ref) const
+TreeKEMPublicKey::find(const LeafNode& leaf) const
 {
   for (LeafIndex i{ 0 }; i < size(); i.val++) {
     const auto& node = node_at(i);
-    if (!node.blank() && node.leaf_node().ref(suite) == ref) {
+    if (!node.blank() && node.leaf_node() == leaf) {
       return i;
     }
   }
@@ -596,17 +597,6 @@ TreeKEMPublicKey::leaf_node(LeafIndex index) const
   }
 
   return node.leaf_node();
-}
-
-std::optional<LeafNode>
-TreeKEMPublicKey::leaf_node(const LeafNodeRef& ref) const
-{
-  auto maybe_leaf = find(ref);
-  if (!maybe_leaf) {
-    return std::nullopt;
-  }
-
-  return node_at(opt::get(maybe_leaf)).leaf_node();
 }
 
 std::tuple<TreeKEMPrivateKey, UpdatePath>

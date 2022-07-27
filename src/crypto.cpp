@@ -204,24 +204,14 @@ CipherSuite::reference_label<KeyPackage>()
   return label;
 }
 
-// MakeLeafNodeRef(value) = KDF.expand(
-//   KDF.extract("", value), "MLS 1.0 Leaf Node Reference", 16)
-template<>
-const bytes&
-CipherSuite::reference_label<LeafNode>()
-{
-  static const auto label = from_ascii("MLS 1.0 Leaf Node Reference");
-  return label;
-}
-
 // MakeProposalRef(value) = KDF.expand(
 //   KDF.extract("", value), "MLS 1.0 Proposal Reference", 16)
 //
 // Even though the label says "Proposal", we actually hash the entire enclosing
-// MLSMessageContentAuth object.
+// MLSAuthenticatedContent object.
 template<>
 const bytes&
-CipherSuite::reference_label<MLSMessageContentAuth>()
+CipherSuite::reference_label<MLSAuthenticatedContent>()
 {
   static const auto label = from_ascii("MLS 1.0 Proposal Reference");
   return label;

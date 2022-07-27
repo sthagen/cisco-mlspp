@@ -130,8 +130,9 @@ struct TranscriptTestVector
   bytes interim_transcript_hash_before;
 
   bytes confirmation_key;
-  mls::Credential credential;
-  mls::MLSMessageContentAuth commit;
+
+  mls::SignaturePublicKey signature_key;
+  mls::MLSAuthenticatedContent commit;
 
   bytes group_context;
   bytes confirmed_transcript_hash_after;
@@ -183,7 +184,6 @@ struct MessagesTestVector
   bytes pre_shared_key_proposal;
   bytes re_init_proposal;
   bytes external_init_proposal;
-  bytes app_ack_proposal;
 
   bytes commit;
 
