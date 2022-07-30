@@ -34,7 +34,7 @@ struct Extension
 
 struct ExtensionType
 {
-  static constexpr Extension::Type external_key_id = 1;
+  static constexpr Extension::Type application_id = 1;
   static constexpr Extension::Type ratchet_tree = 2;
   static constexpr Extension::Type required_capabilities = 3;
   static constexpr Extension::Type external_pub = 4;
@@ -97,6 +97,7 @@ enum struct LeafNodeSource : uint8_t
 //     CipherSuite ciphersuites<V>;
 //     ExtensionType extensions<V>;
 //     ProposalType proposals<V>;
+//     CredentialType credentials<V>;
 // } Capabilities;
 struct Capabilities
 {
@@ -104,12 +105,14 @@ struct Capabilities
   std::vector<CipherSuite::ID> cipher_suites;
   std::vector<Extension::Type> extensions;
   std::vector<uint16_t> proposals;
+  std::vector<CredentialType> credentials;
 
   static Capabilities create_default();
   bool extensions_supported(const std::vector<Extension::Type>& required) const;
   bool proposals_supported(const std::vector<uint16_t>& required) const;
+  bool credential_supported(const Credential& credential) const;
 
-  TLS_SERIALIZABLE(versions, cipher_suites, extensions, proposals)
+  TLS_SERIALIZABLE(versions, cipher_suites, extensions, proposals, credentials)
 };
 
 // struct {
@@ -249,12 +252,12 @@ struct RequiredCapabilitiesExtension
   TLS_SERIALIZABLE(extensions, proposals)
 };
 
-struct ExternalKeyIDExtension
+struct ApplicationIDExtension
 {
-  bytes key_id;
+  bytes id;
 
   static const Extension::Type type;
-  TLS_SERIALIZABLE(key_id)
+  TLS_SERIALIZABLE(id)
 };
 
 ///
