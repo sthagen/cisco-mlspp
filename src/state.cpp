@@ -162,14 +162,14 @@ State::State(const HPKEPrivateKey& init_priv,
 
   _index = opt::get(maybe_index);
 
-  auto ancestor = tree_math::ancestor(_index, group_info.signer);
+  auto ancestor = _index.ancestor(group_info.signer);
   auto path_secret = std::optional<bytes>{};
   if (secrets.path_secret) {
     path_secret = opt::get(secrets.path_secret).secret;
   }
 
   _tree_priv = TreeKEMPrivateKey::joiner(
-    _suite, _tree.size, _index, std::move(leaf_priv), ancestor, path_secret);
+    _tree, _index, std::move(leaf_priv), ancestor, path_secret);
 
   // Ratchet forward into the current epoch
   auto group_ctx = tls::marshal(group_context());
@@ -936,12 +936,10 @@ std::vector<State::CachedProposal>
 State::must_resolve(const std::vector<ProposalOrRef>& ids,
                     std::optional<LeafIndex> sender_index) const
 {
-  auto proposals = std::vector<CachedProposal>(ids.size());
-  auto must_resolve = [&](auto& id) {
+  auto must_resolve = [&](const auto& id) {
     return opt::get(resolve(id, sender_index));
   };
-  std::transform(ids.begin(), ids.end(), proposals.begin(), must_resolve);
-  return proposals;
+  return stdx::transform<CachedProposal>(ids, must_resolve);
 }
 
 std::vector<LeafIndex>
