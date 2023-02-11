@@ -1,14 +1,16 @@
 #include <doctest/doctest.h>
 #include <mls/crypto.h>
+#include <mls_vectors/mls_vectors.h>
 
 #include <string>
 
 using namespace mls;
+using namespace mls_vectors;
 
 TEST_CASE("Basic HPKE")
 {
-  auto info = random_bytes(100);
-  auto aad = random_bytes(100);
+  const auto label = "label"s;
+  auto context = random_bytes(100);
   auto original = random_bytes(100);
 
   for (auto suite_id : all_supported_suites) {
@@ -28,8 +30,8 @@ TEST_CASE("Basic HPKE")
     REQUIRE(gY == gY);
     REQUIRE(gX != gY);
 
-    auto encrypted = gX.encrypt(suite, info, aad, original);
-    auto decrypted = x.decrypt(suite, info, aad, encrypted);
+    auto encrypted = gX.encrypt(suite, label, context, original);
+    auto decrypted = x.decrypt(suite, label, context, encrypted);
 
     REQUIRE(original == decrypted);
   }
@@ -66,7 +68,7 @@ TEST_CASE("Basic Signature")
     REQUIRE(b.public_key == b.public_key);
     REQUIRE(a.public_key != b.public_key);
 
-    auto label = from_ascii("label");
+    const auto label = "label"s;
     auto message = from_hex("01020304");
     auto signature = a.sign(suite, label, message);
 
@@ -86,5 +88,13 @@ TEST_CASE("Signature Key Serializion")
 
     auto gX2 = tls::get<SignaturePublicKey>(tls::marshal(gX));
     REQUIRE(gX2 == gX);
+  }
+}
+
+TEST_CASE("Crypto Interop")
+{
+  for (auto suite : all_supported_suites) {
+    auto tv = CryptoBasicsTestVector{ suite };
+    REQUIRE(tv.verify() == std::nullopt);
   }
 }

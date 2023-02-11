@@ -5,10 +5,10 @@
 using namespace mls;
 using namespace mls_vectors;
 
-TEST_CASE("Encryption Keys Interop")
+TEST_CASE("Secret Tree Interop")
 {
   for (auto suite : all_supported_suites) {
-    const auto tv = EncryptionTestVector::create(suite, 15, 10);
+    const auto tv = SecretTreeTestVector{ suite, 15, { 1, 10 } };
     REQUIRE(tv.verify() == std::nullopt);
   }
 }
@@ -16,7 +16,7 @@ TEST_CASE("Encryption Keys Interop")
 TEST_CASE("Key Schedule Interop")
 {
   for (auto suite : all_supported_suites) {
-    auto tv = KeyScheduleTestVector::create(suite, 15, 3);
+    auto tv = KeyScheduleTestVector{ suite, 15, 3 };
     REQUIRE(tv.verify() == std::nullopt);
   }
 }

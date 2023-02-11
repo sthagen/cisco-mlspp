@@ -15,14 +15,22 @@ static const std::vector<mls::CipherSuite> supported_suites{
 
 TEST_CASE("Tree Math")
 {
-  const auto tv = TreeMathTestVector::create(256);
+  const auto tv = TreeMathTestVector{ 15 };
   REQUIRE(tv.verify() == std::nullopt);
 }
 
-TEST_CASE("Encryption Keys")
+TEST_CASE("Crypto Basics")
 {
   for (auto suite : supported_suites) {
-    const auto tv = EncryptionTestVector::create(suite, 15, 10);
+    const auto tv = CryptoBasicsTestVector{ suite };
+    REQUIRE(tv.verify() == std::nullopt);
+  }
+}
+
+TEST_CASE("Secret Tree")
+{
+  for (auto suite : supported_suites) {
+    const auto tv = SecretTreeTestVector{ suite, 15, { 10 } };
     REQUIRE(tv.verify() == std::nullopt);
   }
 }
@@ -30,7 +38,15 @@ TEST_CASE("Encryption Keys")
 TEST_CASE("Key Schedule")
 {
   for (auto suite : supported_suites) {
-    const auto tv = KeyScheduleTestVector::create(suite, 15, 3);
+    const auto tv = KeyScheduleTestVector{ suite, 15, 3 };
+    REQUIRE(tv.verify() == std::nullopt);
+  }
+}
+
+TEST_CASE("Message Protection")
+{
+  for (auto suite : supported_suites) {
+    auto tv = MessageProtectionTestVector{ suite };
     REQUIRE(tv.verify() == std::nullopt);
   }
 }
@@ -38,7 +54,7 @@ TEST_CASE("Key Schedule")
 TEST_CASE("Transcript")
 {
   for (auto suite : supported_suites) {
-    const auto tv = TranscriptTestVector::create(suite);
+    const auto tv = TranscriptTestVector{ suite };
     REQUIRE(tv.verify() == std::nullopt);
   }
 }
@@ -46,13 +62,13 @@ TEST_CASE("Transcript")
 TEST_CASE("TreeKEM")
 {
   for (auto suite : supported_suites) {
-    const auto tv = TreeKEMTestVector::create(suite, 10);
+    const auto tv = TreeKEMTestVector{ suite, 10 };
     REQUIRE(tv.verify() == std::nullopt);
   }
 }
 
 TEST_CASE("Messages")
 {
-  auto tv = MessagesTestVector::create();
+  auto tv = MessagesTestVector();
   REQUIRE(tv.verify() == std::nullopt);
 }

@@ -305,7 +305,7 @@ MLSClientImpl::verify_test_vector(const VerifyTestVectorRequest* request)
     }
 
     case TestVectorType::ENCRYPTION: {
-      error = tv_json.get<mls_vectors::EncryptionTestVector>().verify();
+      error = tv_json.get<mls_vectors::SecretTreeTestVector>().verify();
       break;
     }
 
@@ -352,38 +352,40 @@ MLSClientImpl::generate_test_vector(const GenerateTestVectorRequest* request,
   json j;
   switch (request->test_vector_type()) {
     case TestVectorType::TREE_MATH: {
-      j = mls_vectors::TreeMathTestVector::create(request->n_leaves());
+      j = mls_vectors::TreeMathTestVector{ request->n_leaves() };
       break;
     }
 
     case TestVectorType::ENCRYPTION: {
       auto suite = static_cast<mls::CipherSuite::ID>(request->cipher_suite());
-      j = mls_vectors::EncryptionTestVector::create(
-        suite, request->n_leaves(), request->n_generations());
+      j = mls_vectors::SecretTreeTestVector{ suite,
+                                             request->n_leaves(),
+                                             { request->n_generations() } };
       break;
     }
 
     case TestVectorType::KEY_SCHEDULE: {
       auto suite = static_cast<mls::CipherSuite::ID>(request->cipher_suite());
-      j = mls_vectors::KeyScheduleTestVector::create(
-        suite, request->n_epochs(), n_psks);
+      j = mls_vectors::KeyScheduleTestVector{ suite,
+                                              request->n_epochs(),
+                                              n_psks };
       break;
     }
 
     case TestVectorType::TRANSCRIPT: {
       auto suite = static_cast<mls::CipherSuite::ID>(request->cipher_suite());
-      j = mls_vectors::TranscriptTestVector::create(suite);
+      j = mls_vectors::TranscriptTestVector{ suite };
       break;
     }
 
     case TestVectorType::TREEKEM: {
       auto suite = static_cast<mls::CipherSuite::ID>(request->cipher_suite());
-      j = mls_vectors::TreeKEMTestVector::create(suite, request->n_leaves());
+      j = mls_vectors::TreeKEMTestVector{ suite, request->n_leaves() };
       break;
     }
 
     case TestVectorType::MESSAGES: {
-      j = mls_vectors::MessagesTestVector::create();
+      j = mls_vectors::MessagesTestVector();
       break;
     }
 
@@ -576,7 +578,7 @@ MLSClientImpl::unprotect(CachedState& entry,
                          UnprotectResponse* response)
 {
   auto ct_data = string_to_bytes(request->ciphertext());
-  auto ct = tls::get<mls::MLSCiphertext>(ct_data);
+  auto ct = tls::get<mls::PrivateMessage>(ct_data);
   auto [aad, pt] = entry.state.unprotect(ct);
   mls::silence_unused(aad);
 
