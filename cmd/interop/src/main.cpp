@@ -20,6 +20,8 @@ using namespace mls_vectors;
 static constexpr uint64_t CRYPTO_BASICS = 10;
 static constexpr uint64_t SECRET_TREE = 11;
 static constexpr uint64_t MESSAGE_PROTECTION = 12;
+static constexpr uint64_t PSK_SECRET = 13;
+static constexpr uint64_t WELCOME = 14;
 
 // XXX(RLB): This function currently produces only one example of each type, as
 // a top-level object, not a top-level array.  We should produce a more
@@ -35,7 +37,7 @@ make_test_vector(uint64_t type)
       return TreeMathTestVector{ n };
 
     case TestVectorType::KEY_SCHEDULE:
-      return KeyScheduleTestVector{ suite, n, n };
+      return KeyScheduleTestVector{ suite, n };
 
     case TestVectorType::TRANSCRIPT:
       return TranscriptTestVector{ suite };
@@ -44,7 +46,9 @@ make_test_vector(uint64_t type)
       return TreeKEMTestVector{ suite, n };
 
     case TestVectorType::MESSAGES:
-      return MessagesTestVector();
+      return std::vector<MessagesTestVector>{
+        MessagesTestVector(),
+      };
 
     case CRYPTO_BASICS: {
       auto cases = std::vector<CryptoBasicsTestVector>();
@@ -69,6 +73,26 @@ make_test_vector(uint64_t type)
 
     case MESSAGE_PROTECTION: {
       auto cases = std::vector<MessageProtectionTestVector>();
+
+      for (const auto& suite : mls::all_supported_suites) {
+        cases.emplace_back(suite);
+      }
+
+      return cases;
+    }
+
+    case PSK_SECRET: {
+      auto cases = std::vector<PSKSecretTestVector>();
+
+      for (const auto& suite : mls::all_supported_suites) {
+        cases.emplace_back(suite, 5);
+      }
+
+      return cases;
+    }
+
+    case WELCOME: {
+      auto cases = std::vector<WelcomeTestVector>();
 
       for (const auto& suite : mls::all_supported_suites) {
         cases.emplace_back(suite);
@@ -118,7 +142,7 @@ verify_test_vector(uint64_t type)
       return verify_test_vector<TreeMathTestVector>(j);
 
     case TestVectorType::KEY_SCHEDULE:
-      return j.get<KeyScheduleTestVector>().verify();
+      return verify_test_vector<KeyScheduleTestVector>(j);
 
     case TestVectorType::TRANSCRIPT:
       return j.get<TranscriptTestVector>().verify();
@@ -127,7 +151,7 @@ verify_test_vector(uint64_t type)
       return j.get<TreeKEMTestVector>().verify();
 
     case TestVectorType::MESSAGES:
-      return j.get<MessagesTestVector>().verify();
+      return verify_test_vector<MessagesTestVector>(j);
 
     case CRYPTO_BASICS:
       return verify_test_vector<CryptoBasicsTestVector>(j);
@@ -137,6 +161,12 @@ verify_test_vector(uint64_t type)
 
     case MESSAGE_PROTECTION:
       return verify_test_vector<MessageProtectionTestVector>(j);
+
+    case PSK_SECRET:
+      return verify_test_vector<PSKSecretTestVector>(j);
+
+    case WELCOME:
+      return verify_test_vector<WelcomeTestVector>(j);
 
     default:
       return "Invalid test vector type";

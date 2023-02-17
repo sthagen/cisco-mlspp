@@ -38,7 +38,7 @@ TEST_CASE("Secret Tree")
 TEST_CASE("Key Schedule")
 {
   for (auto suite : supported_suites) {
-    const auto tv = KeyScheduleTestVector{ suite, 15, 3 };
+    const auto tv = KeyScheduleTestVector{ suite, 15 };
     REQUIRE(tv.verify() == std::nullopt);
   }
 }
@@ -51,10 +51,26 @@ TEST_CASE("Message Protection")
   }
 }
 
+TEST_CASE("PSK Secret")
+{
+  for (auto suite : supported_suites) {
+    const auto tv = PSKSecretTestVector{ suite, 5 };
+    REQUIRE(tv.verify() == std::nullopt);
+  }
+}
+
 TEST_CASE("Transcript")
 {
   for (auto suite : supported_suites) {
     const auto tv = TranscriptTestVector{ suite };
+    REQUIRE(tv.verify() == std::nullopt);
+  }
+}
+
+TEST_CASE("Welcome")
+{
+  for (auto suite : supported_suites) {
+    const auto tv = WelcomeTestVector{ suite };
     REQUIRE(tv.verify() == std::nullopt);
   }
 }

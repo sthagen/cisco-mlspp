@@ -195,11 +195,11 @@ struct SecretTreeTestVector : PseudoRandom
 
 struct KeyScheduleTestVector : PseudoRandom
 {
-  struct ExternalPSKInfo
+  struct Export
   {
-    bytes id;
-    bytes nonce;
-    bytes secret;
+    std::string exporter_label;
+    size_t exporter_length;
+    bytes exported;
   };
 
   struct Epoch
@@ -208,13 +208,10 @@ struct KeyScheduleTestVector : PseudoRandom
     bytes tree_hash;
     bytes commit_secret;
     bytes confirmed_transcript_hash;
-    std::vector<ExternalPSKInfo> external_psks;
-    bytes psk_nonce;
 
     // Computed values
     bytes group_context;
 
-    bytes psk_secret;
     bytes joiner_secret;
     bytes welcome_secret;
     bytes init_secret;
@@ -222,13 +219,14 @@ struct KeyScheduleTestVector : PseudoRandom
     bytes sender_data_secret;
     bytes encryption_secret;
     bytes exporter_secret;
-    bytes authentication_secret;
+    bytes epoch_authenticator;
     bytes external_secret;
     bytes confirmation_key;
     bytes membership_key;
-    bytes resumption_secret;
+    bytes resumption_psk;
 
     mls::HPKEPublicKey external_pub;
+    Export exporter;
   };
 
   mls::CipherSuite cipher_suite;
@@ -239,9 +237,7 @@ struct KeyScheduleTestVector : PseudoRandom
   std::vector<Epoch> epochs;
 
   KeyScheduleTestVector() = default;
-  KeyScheduleTestVector(mls::CipherSuite suite,
-                        uint32_t n_epochs,
-                        uint32_t n_psks);
+  KeyScheduleTestVector(mls::CipherSuite suite, uint32_t n_epochs);
   std::optional<std::string> verify() const;
 };
 
@@ -253,7 +249,6 @@ struct MessageProtectionTestVector : PseudoRandom
   mls::epoch_t epoch;
   bytes tree_hash;
   bytes confirmed_transcript_hash;
-  mls::LeafCount n_leaves;
 
   mls::SignaturePrivateKey signature_priv;
   mls::SignaturePublicKey signature_pub;
@@ -270,7 +265,7 @@ struct MessageProtectionTestVector : PseudoRandom
   mls::MLSMessage commit_pub;
   mls::MLSMessage commit_priv;
 
-  mls::ApplicationData application;
+  bytes application;
   mls::MLSMessage application_priv;
 
   MessageProtectionTestVector() = default;
@@ -278,14 +273,32 @@ struct MessageProtectionTestVector : PseudoRandom
   std::optional<std::string> verify();
 
 private:
-  mls::GroupContext group_context;
-  mls::GroupKeySource keys;
+  mls::GroupKeySource group_keys() const;
+  mls::GroupContext group_context() const;
 
   mls::MLSMessage protect_pub(
     const mls::GroupContent::RawContent& raw_content) const;
   mls::MLSMessage protect_priv(
     const mls::GroupContent::RawContent& raw_content);
   std::optional<mls::GroupContent> unprotect(const mls::MLSMessage& message);
+};
+
+struct PSKSecretTestVector : PseudoRandom
+{
+  struct PSK
+  {
+    bytes psk_id;
+    bytes psk_nonce;
+    bytes psk;
+  };
+
+  mls::CipherSuite cipher_suite;
+  std::vector<PSK> psks;
+  bytes psk_secret;
+
+  PSKSecretTestVector() = default;
+  PSKSecretTestVector(mls::CipherSuite suite, size_t n_psks);
+  std::optional<std::string> verify() const;
 };
 
 struct TranscriptTestVector : PseudoRandom
@@ -309,6 +322,21 @@ struct TranscriptTestVector : PseudoRandom
 
   TranscriptTestVector() = default;
   TranscriptTestVector(mls::CipherSuite suite);
+  std::optional<std::string> verify() const;
+};
+
+struct WelcomeTestVector : PseudoRandom
+{
+  mls::CipherSuite cipher_suite;
+
+  mls::HPKEPrivateKey init_priv;
+  mls::SignaturePublicKey signer_pub;
+
+  mls::MLSMessage key_package;
+  mls::MLSMessage welcome;
+
+  WelcomeTestVector() = default;
+  WelcomeTestVector(mls::CipherSuite suite);
   std::optional<std::string> verify() const;
 };
 
@@ -345,27 +373,26 @@ struct TreeKEMTestVector : PseudoRandom
 
 struct MessagesTestVector : PseudoRandom
 {
-  bytes key_package;
-  bytes ratchet_tree;
+  bytes mls_welcome;
+  bytes mls_group_info;
+  bytes mls_key_package;
 
-  bytes group_info;
+  bytes ratchet_tree;
   bytes group_secrets;
-  bytes welcome;
 
   bytes add_proposal;
   bytes update_proposal;
   bytes remove_proposal;
   bytes pre_shared_key_proposal;
-  bytes reinit_proposal;
+  bytes re_init_proposal;
   bytes external_init_proposal;
+  bytes group_context_extensions_proposal;
 
   bytes commit;
 
-  bytes content_auth_app;
-  bytes content_auth_proposal;
-  bytes content_auth_commit;
-  bytes mls_plaintext;
-  bytes mls_ciphertext;
+  bytes public_message_proposal;
+  bytes public_message_commit;
+  bytes private_message;
 
   MessagesTestVector();
   std::optional<std::string> verify() const;

@@ -13,6 +13,14 @@ using namespace mls;
 /// Assertions for verifying test vectors
 ///
 
+template<typename T, std::enable_if_t<std::is_enum<T>::value, int> = 0>
+std::ostream&
+operator<<(std::ostream& str, const T& obj)
+{
+  auto u = static_cast<std::underlying_type_t<T>>(obj);
+  return str << u;
+}
+
 static std::ostream&
 operator<<(std::ostream& str, const NodeIndex& obj)
 {
@@ -42,11 +50,13 @@ operator<<(std::ostream& str, const std::vector<uint8_t>& obj)
   return str << to_hex(obj);
 }
 
+#if 0
 static std::ostream&
 operator<<(std::ostream& str, const HPKEPublicKey& obj)
 {
   return str << to_hex(tls::marshal(obj));
 }
+#endif
 
 static std::ostream&
 operator<<(std::ostream& str, const GroupContent::RawContent& obj)
@@ -549,16 +559,15 @@ SecretTreeTestVector::verify() const
 ///
 
 KeyScheduleTestVector::KeyScheduleTestVector(CipherSuite suite,
-                                             uint32_t n_epochs,
-                                             uint32_t n_psks)
+                                             uint32_t n_epochs)
   : PseudoRandom(suite, "key-schedule")
   , cipher_suite(suite)
   , group_id(prg.secret("group_id"))
   , initial_init_secret(prg.secret("group_id"))
 {
   auto group_context = GroupContext{ suite, group_id, 0, {}, {}, {} };
-  auto epoch = KeyScheduleEpoch(
-    cipher_suite, initial_init_secret, tls::marshal(group_context));
+  auto epoch = KeyScheduleEpoch(cipher_suite);
+  epoch.init_secret = initial_init_secret;
 
   for (uint64_t i = 0; i < n_epochs; i++) {
     auto epoch_prg = prg.sub(to_hex(tls::marshal(i)));
@@ -568,58 +577,43 @@ KeyScheduleTestVector::KeyScheduleTestVector(CipherSuite suite,
       epoch_prg.secret("confirmed_transcript_hash");
     auto ctx = tls::marshal(group_context);
 
-    auto psks = std::vector<PSKWithSecret>{};
-    auto external_psks = std::vector<ExternalPSKInfo>{};
-    for (uint32_t j = 0; j < n_psks; j++) {
-      auto jx = to_hex(tls::marshal(j));
-      auto id = epoch_prg.secret("psk_id " + jx);
-      auto nonce = epoch_prg.secret("psk_nonce " + jx);
-      auto secret = epoch_prg.secret("psk_secret " + jx);
-
-      psks.push_back({ PreSharedKeyID{ ExternalPSK{ id }, nonce }, secret });
-      external_psks.push_back({ id, nonce, secret });
-    }
-
-    auto psk_nonce = bytes{};
-    if (i > 0) {
-      auto psk = epoch.resumption_psk(
-        ResumptionPSKUsage::branch, group_id, epoch_t(i - 1));
-      psk_nonce = psk.id.psk_nonce;
-      psks.push_back(psk);
-    }
-
     auto commit_secret = epoch_prg.secret("commit_secret");
     // TODO(RLB) Add Test case for externally-driven epoch change
-    epoch = epoch.next(commit_secret, psks, std::nullopt, ctx);
+    epoch = epoch.next(commit_secret, {}, std::nullopt, ctx);
 
     auto welcome_secret =
-      KeyScheduleEpoch::welcome_secret(cipher_suite, epoch.joiner_secret, psks);
+      KeyScheduleEpoch::welcome_secret(cipher_suite, epoch.joiner_secret, {});
 
-    epochs.push_back({
-      group_context.tree_hash,
-      commit_secret,
-      group_context.confirmed_transcript_hash,
-      external_psks,
-      psk_nonce,
+    auto exporter_label = to_hex(epoch_prg.secret("exporter_label"));
+    auto exporter_length = cipher_suite.secret_size();
+    auto exported = epoch.do_export(exporter_label, {}, exporter_length);
 
-      ctx,
+    epochs.push_back({ group_context.tree_hash,
+                       commit_secret,
+                       group_context.confirmed_transcript_hash,
 
-      epoch.psk_secret,
-      epoch.joiner_secret,
-      welcome_secret,
-      epoch.init_secret,
+                       ctx,
 
-      epoch.sender_data_secret,
-      epoch.encryption_secret,
-      epoch.exporter_secret,
-      epoch.authentication_secret,
-      epoch.external_secret,
-      epoch.confirmation_key,
-      epoch.membership_key,
-      epoch.resumption_secret,
+                       epoch.joiner_secret,
+                       welcome_secret,
+                       epoch.init_secret,
 
-      epoch.external_priv.public_key,
-    });
+                       epoch.sender_data_secret,
+                       epoch.encryption_secret,
+                       epoch.exporter_secret,
+                       epoch.epoch_authenticator,
+                       epoch.external_secret,
+                       epoch.confirmation_key,
+                       epoch.membership_key,
+                       epoch.resumption_psk,
+
+                       epoch.external_priv.public_key,
+
+                       {
+                         exporter_label,
+                         exporter_length,
+                         exported,
+                       } });
 
     group_context.epoch += 1;
   }
@@ -629,38 +623,22 @@ std::optional<std::string>
 KeyScheduleTestVector::verify() const
 {
   auto group_context = GroupContext{ cipher_suite, group_id, 0, {}, {}, {} };
-  auto epoch = KeyScheduleEpoch(
-    cipher_suite, initial_init_secret, tls::marshal(group_context));
+  auto epoch = KeyScheduleEpoch(cipher_suite);
+  epoch.init_secret = initial_init_secret;
 
-  auto epoch_n = epoch_t(0);
   for (const auto& tve : epochs) {
-    // Ratchet forward the key schedule
     group_context.tree_hash = tve.tree_hash;
     group_context.confirmed_transcript_hash = tve.confirmed_transcript_hash;
     auto ctx = tls::marshal(group_context);
     VERIFY_EQUAL("group context", ctx, tve.group_context);
 
-    auto psks = std::vector<PSKWithSecret>{};
-    for (const auto& psk : tve.external_psks) {
-      psks.push_back(
-        { PreSharedKeyID{ ExternalPSK{ psk.id }, psk.nonce }, psk.secret });
-    }
-
-    if (epoch_n > 0) {
-      auto psk =
-        epoch.resumption_psk(ResumptionPSKUsage::branch, group_id, epoch_n - 1);
-      psk.id.psk_nonce = tve.psk_nonce;
-      psks.push_back(psk);
-    }
-
-    epoch_n += 1;
-    epoch = epoch.next(tve.commit_secret, psks, std::nullopt, ctx);
+    epoch = epoch.next(tve.commit_secret, {}, std::nullopt, ctx);
 
     // Verify the rest of the epoch
     VERIFY_EQUAL("joiner secret", epoch.joiner_secret, tve.joiner_secret);
 
     auto welcome_secret =
-      KeyScheduleEpoch::welcome_secret(cipher_suite, tve.joiner_secret, psks);
+      KeyScheduleEpoch::welcome_secret(cipher_suite, tve.joiner_secret, {});
     VERIFY_EQUAL("welcome secret", welcome_secret, tve.welcome_secret);
 
     VERIFY_EQUAL(
@@ -668,19 +646,22 @@ KeyScheduleTestVector::verify() const
     VERIFY_EQUAL(
       "encryption secret", epoch.encryption_secret, tve.encryption_secret);
     VERIFY_EQUAL("exporter secret", epoch.exporter_secret, tve.exporter_secret);
-    VERIFY_EQUAL("authentication secret",
-                 epoch.authentication_secret,
-                 tve.authentication_secret);
+    VERIFY_EQUAL("epoch authenticator",
+                 epoch.epoch_authenticator,
+                 tve.epoch_authenticator);
     VERIFY_EQUAL("external secret", epoch.external_secret, tve.external_secret);
     VERIFY_EQUAL(
       "confirmation key", epoch.confirmation_key, tve.confirmation_key);
     VERIFY_EQUAL("membership key", epoch.membership_key, tve.membership_key);
-    VERIFY_EQUAL(
-      "resumption secret", epoch.resumption_secret, tve.resumption_secret);
+    VERIFY_EQUAL("resumption psk", epoch.resumption_psk, tve.resumption_psk);
     VERIFY_EQUAL("init secret", epoch.init_secret, tve.init_secret);
 
     VERIFY_EQUAL(
       "external pub", epoch.external_priv.public_key, tve.external_pub);
+
+    auto exported = epoch.do_export(
+      tve.exporter.exporter_label, {}, tve.exporter.exporter_length);
+    VERIFY_EQUAL("exported", exported, tve.exporter.exported);
 
     group_context.epoch += 1;
   }
@@ -699,7 +680,6 @@ MessageProtectionTestVector::MessageProtectionTestVector(CipherSuite suite)
   , epoch(prg.uint64("epoch"))
   , tree_hash(prg.secret("tree_hash"))
   , confirmed_transcript_hash(prg.secret("confirmed_transcript_hash"))
-  , n_leaves(2)
   , signature_priv(prg.signature_key("signature_priv"))
   , signature_pub(signature_priv.public_key)
   , encryption_secret(prg.secret("encryption_secret"))
@@ -708,13 +688,6 @@ MessageProtectionTestVector::MessageProtectionTestVector(CipherSuite suite)
   , proposal{ GroupContextExtensions{} }
   , commit{ /* XXX(RLB) this is technically invalid, empty w/o path */ }
   , application{ prg.secret("application") }
-  , group_context{ cipher_suite,
-                   group_id,
-                   epoch,
-                   tree_hash,
-                   confirmed_transcript_hash,
-                   {} }
-  , keys(cipher_suite, n_leaves, encryption_secret)
 {
   proposal_pub = protect_pub(proposal);
   proposal_priv = protect_priv(proposal);
@@ -722,20 +695,14 @@ MessageProtectionTestVector::MessageProtectionTestVector(CipherSuite suite)
   commit_pub = protect_pub(commit);
   commit_priv = protect_priv(commit);
 
-  application_priv = protect_priv(application);
+  application_priv = protect_priv(ApplicationData{ application });
 }
 
 std::optional<std::string>
 MessageProtectionTestVector::verify()
 {
   // Initialize fields that don't get set from JSON
-  group_context = GroupContext{
-    cipher_suite, group_id, epoch, tree_hash, confirmed_transcript_hash, {}
-  };
-
-  n_leaves = LeafCount{ 2 };
-  keys = GroupKeySource(cipher_suite, n_leaves, encryption_secret);
-
+  prg = PseudoRandom::Generator(cipher_suite, "message-protection");
   signature_priv.set_public_key(cipher_suite);
 
   // Sanity check the key pairs
@@ -770,8 +737,9 @@ MessageProtectionTestVector::verify()
   // Verify application data unprotect as PrivateMessage
   auto app_unprotected = unprotect(application_priv);
   VERIFY("app priv unprotect auth", app_unprotected);
-  VERIFY_EQUAL(
-    "app priv unprotect", opt::get(app_unprotected).content, application);
+  VERIFY_EQUAL("app priv unprotect",
+               opt::get(app_unprotected).content,
+               ApplicationData{ application });
 
   // Verify protect/unprotect round-trips
   // XXX(RLB): Note that because (a) unprotect() deletes keys from the ratchet
@@ -812,14 +780,28 @@ MessageProtectionTestVector::verify()
                opt::get(commit_priv_protected_unprotected).content,
                commit);
 
-  auto app_protected = protect_priv(application);
+  auto app_protected = protect_priv(ApplicationData{ application });
   auto app_protected_unprotected = unprotect(app_protected);
   VERIFY("app priv protect/unprotect auth", app_protected_unprotected);
   VERIFY_EQUAL("app priv protect/unprotect",
                opt::get(app_protected_unprotected).content,
-               application);
+               ApplicationData{ application });
 
   return std::nullopt;
+}
+
+GroupKeySource
+MessageProtectionTestVector::group_keys() const
+{
+  return { cipher_suite, LeafCount{ 2 }, encryption_secret };
+}
+
+GroupContext
+MessageProtectionTestVector::group_context() const
+{
+  return GroupContext{
+    cipher_suite, group_id, epoch, tree_hash, confirmed_transcript_hash, {}
+  };
 }
 
 MLSMessage
@@ -836,14 +818,14 @@ MessageProtectionTestVector::protect_pub(
                                                  content,
                                                  cipher_suite,
                                                  signature_priv,
-                                                 group_context);
+                                                 group_context());
   if (content.content_type() == ContentType::commit) {
     auto confirmation_tag = prg.secret("confirmation_tag");
     auth_content.set_confirmation_tag(confirmation_tag);
   }
 
   return PublicMessage::protect(
-    auth_content, cipher_suite, membership_key, group_context);
+    auth_content, cipher_suite, membership_key, group_context());
 }
 
 MLSMessage
@@ -861,12 +843,13 @@ MessageProtectionTestVector::protect_priv(
                                                  content,
                                                  cipher_suite,
                                                  signature_priv,
-                                                 group_context);
+                                                 group_context());
   if (content.content_type() == ContentType::commit) {
     auto confirmation_tag = prg.secret("confirmation_tag");
     auth_content.set_confirmation_tag(confirmation_tag);
   }
 
+  auto keys = group_keys();
   return PrivateMessage::protect(
     auth_content, cipher_suite, keys, sender_data_secret, padding_size);
 }
@@ -876,9 +859,10 @@ MessageProtectionTestVector::unprotect(const MLSMessage& message)
 {
   auto do_unprotect = overloaded{
     [&](const PublicMessage& pt) {
-      return pt.unprotect(cipher_suite, membership_key, group_context);
+      return pt.unprotect(cipher_suite, membership_key, group_context());
     },
     [&](const PrivateMessage& ct) {
+      auto keys = group_keys();
       return ct.unprotect(cipher_suite, keys, sender_data_secret);
     },
     [](const auto& /* other */) -> std::optional<AuthenticatedContent> {
@@ -892,11 +876,57 @@ MessageProtectionTestVector::unprotect(const MLSMessage& message)
   }
 
   auto auth_content = opt::get(maybe_auth_content);
-  if (!auth_content.verify(cipher_suite, signature_pub, group_context)) {
+  if (!auth_content.verify(cipher_suite, signature_pub, group_context())) {
     return std::nullopt;
   }
 
   return auth_content.content;
+}
+
+///
+/// PSKTestVector
+///
+static std::vector<PSKWithSecret>
+to_psk_w_secret(const std::vector<PSKSecretTestVector::PSK>& psks)
+{
+  auto pskws = std::vector<PSKWithSecret>(psks.size());
+  std::transform(
+    std::begin(psks), std::end(psks), std::begin(pskws), [](const auto& psk) {
+      auto ext_id = ExternalPSK{ psk.psk_id };
+      auto id = PreSharedKeyID{ ext_id, psk.psk_nonce };
+      return PSKWithSecret{ id, psk.psk };
+    });
+
+  return pskws;
+}
+
+PSKSecretTestVector::PSKSecretTestVector(mls::CipherSuite suite, size_t n_psks)
+  : PseudoRandom(suite, "psk_secret")
+  , cipher_suite(suite)
+  , psks(n_psks)
+{
+  uint32_t i = 0;
+  for (auto& psk : psks) {
+    auto ix = to_hex(tls::marshal(i));
+    i += 1;
+
+    psk.psk_id = prg.secret("psk_id" + ix);
+    psk.psk_nonce = prg.secret("psk_nonce" + ix);
+    psk.psk = prg.secret("psk" + ix);
+  }
+
+  psk_secret =
+    KeyScheduleEpoch::make_psk_secret(cipher_suite, to_psk_w_secret(psks));
+}
+
+std::optional<std::string>
+PSKSecretTestVector::verify() const
+{
+  auto actual =
+    KeyScheduleEpoch::make_psk_secret(cipher_suite, to_psk_w_secret(psks));
+  VERIFY_EQUAL("psk secret", actual, psk_secret);
+
+  return std::nullopt;
 }
 
 ///
@@ -982,6 +1012,97 @@ TranscriptTestVector::verify() const
 
   auto confirmation_tag = ks_epoch.confirmation_tag(transcript.confirmed);
   VERIFY("confirmation", commit.check_confirmation_tag(confirmation_tag));
+
+  return std::nullopt;
+}
+
+///
+/// WelcomeTestVector
+///
+WelcomeTestVector::WelcomeTestVector(CipherSuite suite)
+  : PseudoRandom(suite, "welcome")
+  , cipher_suite(suite)
+  , init_priv(prg.hpke_key("init_priv"))
+{
+  auto joiner_secret = prg.secret("joiner_secret");
+  auto group_id = prg.secret("group_id");
+  auto epoch = epoch_t(prg.uint64("epoch"));
+  auto tree_hash = prg.secret("tree_hash");
+  auto confirmed_transcript_hash = prg.secret("confirmed_transcript_hash");
+  auto enc_priv = prg.hpke_key("enc_priv");
+  auto sig_priv = prg.signature_key("sig_priv");
+  auto cred = Credential::basic(prg.secret("identity"));
+
+  auto signer_index = LeafIndex{ prg.uint32("signer") };
+  auto signer_priv = prg.signature_key("signer_priv");
+  signer_pub = signer_priv.public_key;
+
+  auto leaf_node = LeafNode{
+    cipher_suite,
+    enc_priv.public_key,
+    sig_priv.public_key,
+    cred,
+    Capabilities::create_default(),
+    Lifetime::create_default(),
+    {},
+    sig_priv,
+  };
+  auto key_package_obj = KeyPackage{
+    cipher_suite, init_priv.public_key, leaf_node, {}, sig_priv,
+  };
+  key_package = key_package_obj;
+
+  auto group_context = GroupContext{
+    cipher_suite, group_id, epoch, tree_hash, confirmed_transcript_hash, {}
+  };
+
+  auto key_schedule = KeyScheduleEpoch(
+    cipher_suite, joiner_secret, {}, tls::marshal(group_context));
+  auto confirmation_tag =
+    key_schedule.confirmation_tag(confirmed_transcript_hash);
+
+  auto group_info = GroupInfo{
+    group_context,
+    {},
+    confirmation_tag,
+  };
+  group_info.sign(signer_index, signer_priv);
+
+  auto welcome_obj = Welcome(cipher_suite, joiner_secret, {}, group_info);
+  welcome_obj.encrypt(key_package_obj, std::nullopt);
+  welcome = welcome_obj;
+}
+
+std::optional<std::string>
+WelcomeTestVector::verify() const
+{
+  VERIFY_EQUAL(
+    "kp format", key_package.wire_format(), WireFormat::mls_key_package);
+  VERIFY_EQUAL(
+    "welcome format", welcome.wire_format(), WireFormat::mls_welcome);
+
+  const auto& key_package_obj = var::get<KeyPackage>(key_package.message);
+  const auto& welcome_obj = var::get<Welcome>(welcome.message);
+
+  VERIFY_EQUAL("kp suite", key_package_obj.cipher_suite, cipher_suite);
+  VERIFY_EQUAL("welcome suite", welcome_obj.cipher_suite, cipher_suite);
+
+  auto maybe_kpi = welcome_obj.find(key_package_obj);
+  VERIFY("found key package", maybe_kpi);
+
+  auto kpi = opt::get(maybe_kpi);
+  auto group_secrets = welcome_obj.decrypt_secrets(kpi, init_priv);
+  auto group_info = welcome_obj.decrypt(group_secrets.joiner_secret, {});
+
+  // Verify signature on GroupInfo
+  VERIFY("group info verify", group_info.verify(signer_pub));
+
+  // Verify confirmation tag
+  const auto& group_context = group_info.group_context;
+  auto key_schedule = KeyScheduleEpoch(
+    cipher_suite, group_secrets.joiner_secret, {}, tls::marshal(group_context));
+  auto confirmation_tag =
+    key_schedule.confirmation_tag(group_context.confirmed_transcript_hash);
 
   return std::nullopt;
 }
@@ -1251,103 +1372,116 @@ MessagesTestVector::MessagesTestVector()
                             } };
 
   // AuthenticatedContent with Application / Proposal / Commit
-  auto content_auth_app_obj = AuthenticatedContent::sign(
+
+  // PublicMessage
+  auto membership_key = prg.secret("membership_key");
+
+  auto content_auth_proposal = AuthenticatedContent::sign(
+    WireFormat::mls_plaintext,
+    { group_id, epoch, sender, {}, Proposal{ remove } },
+    suite,
+    sig_priv,
+    group_context);
+  auto public_message_proposal_obj = PublicMessage::protect(
+    content_auth_proposal, suite, membership_key, group_context);
+
+  auto content_auth_commit =
+    AuthenticatedContent::sign(WireFormat::mls_plaintext,
+                               { group_id, epoch, sender, {}, commit_obj },
+                               suite,
+                               sig_priv,
+                               group_context);
+  content_auth_commit.set_confirmation_tag(prg.secret("confirmation_tag"));
+  auto public_message_commit_obj = PublicMessage::protect(
+    content_auth_commit, suite, membership_key, group_context);
+
+  // PrivateMessage
+  auto content_auth_application_obj = AuthenticatedContent::sign(
     WireFormat::mls_ciphertext,
     { group_id, epoch, sender, {}, ApplicationData{} },
     suite,
     sig_priv,
     group_context);
 
-  auto content_auth_proposal_obj = AuthenticatedContent::sign(
-    WireFormat::mls_plaintext,
-    { group_id, epoch, sender, {}, Proposal{ remove } },
-    suite,
-    sig_priv,
-    group_context);
-
-  auto content_auth_commit_obj =
-    AuthenticatedContent::sign(WireFormat::mls_plaintext,
-                               { group_id, epoch, sender, {}, commit_obj },
-                               suite,
-                               sig_priv,
-                               group_context);
-  content_auth_commit_obj.set_confirmation_tag(prg.secret("confirmation_tag"));
-
-  // MLSMessage(PublicMessage)
-  auto mls_plaintext_obj =
-    MLSMessage{ PublicMessage::protect(content_auth_proposal_obj,
-                                       suite,
-                                       prg.secret("membership_key"),
-                                       group_context) };
-
-  // MLSMessage(PrivateMessage)
   auto keys = GroupKeySource(
     suite, LeafCount{ index.val + 1 }, prg.secret("encryption_secret"));
-  auto mls_ciphertext_obj = MLSMessage{ PrivateMessage::protect(
-    content_auth_app_obj, suite, keys, prg.secret("sender_data_secret"), 10) };
+  auto private_message_obj =
+    PrivateMessage::protect(content_auth_application_obj,
+                            suite,
+                            keys,
+                            prg.secret("sender_data_secret"),
+                            10);
 
   // Serialize out all the objects
-  key_package = tls::marshal(key_package_obj);
-  ratchet_tree = tls::marshal(ratchet_tree_obj);
+  mls_welcome = tls::marshal(MLSMessage{ welcome_obj });
+  mls_group_info = tls::marshal(MLSMessage{ group_info_obj });
+  mls_key_package = tls::marshal(MLSMessage{ key_package_obj });
 
-  group_info = tls::marshal(group_info_obj);
+  ratchet_tree = tls::marshal(ratchet_tree_obj);
   group_secrets = tls::marshal(group_secrets_obj);
-  welcome = tls::marshal(welcome_obj);
 
   add_proposal = tls::marshal(add);
   update_proposal = tls::marshal(update);
   remove_proposal = tls::marshal(remove);
   pre_shared_key_proposal = tls::marshal(pre_shared_key);
-  reinit_proposal = tls::marshal(reinit);
+  re_init_proposal = tls::marshal(reinit);
   external_init_proposal = tls::marshal(external_init);
 
   commit = tls::marshal(commit_obj);
 
-  content_auth_app = tls::marshal(content_auth_app_obj);
-  content_auth_proposal = tls::marshal(content_auth_proposal_obj);
-  content_auth_commit = tls::marshal(content_auth_commit_obj);
-  mls_plaintext = tls::marshal(mls_plaintext_obj);
-  mls_ciphertext = tls::marshal(mls_ciphertext_obj);
+  public_message_proposal =
+    tls::marshal(MLSMessage{ public_message_proposal_obj });
+  public_message_commit = tls::marshal(MLSMessage{ public_message_commit_obj });
+  private_message = tls::marshal(MLSMessage{ private_message_obj });
 }
 
 std::optional<std::string>
 MessagesTestVector::verify() const
 {
-  VERIFY_TLS_RTT("KeyPackage", KeyPackage, key_package);
-  VERIFY_TLS_RTT("RatchetTree", RatchetTreeExtension, ratchet_tree);
+  // TODO(RLB) Verify signatures
+  // TODO(RLB) Verify content types in PublicMessage objects
+  auto require_format = [](WireFormat format) {
+    return
+      [format](const MLSMessage& msg) { return msg.wire_format() == format; };
+  };
 
-  VERIFY_TLS_RTT("GroupInfo", GroupInfo, group_info);
+  VERIFY_TLS_RTT_VAL("Welcome",
+                     MLSMessage,
+                     mls_welcome,
+                     require_format(WireFormat::mls_welcome));
+  VERIFY_TLS_RTT_VAL("GroupInfo",
+                     MLSMessage,
+                     mls_group_info,
+                     require_format(WireFormat::mls_group_info));
+  VERIFY_TLS_RTT_VAL("KeyPackage",
+                     MLSMessage,
+                     mls_key_package,
+                     require_format(WireFormat::mls_key_package));
+
+  VERIFY_TLS_RTT("RatchetTree", RatchetTreeExtension, ratchet_tree);
   VERIFY_TLS_RTT("GroupSecrets", GroupSecrets, group_secrets);
-  VERIFY_TLS_RTT("Welcome", Welcome, welcome);
 
   VERIFY_TLS_RTT("Add", Add, add_proposal);
   VERIFY_TLS_RTT("Update", Update, update_proposal);
   VERIFY_TLS_RTT("Remove", Remove, remove_proposal);
   VERIFY_TLS_RTT("PreSharedKey", PreSharedKey, pre_shared_key_proposal);
-  VERIFY_TLS_RTT("ReInit", ReInit, reinit_proposal);
+  VERIFY_TLS_RTT("ReInit", ReInit, re_init_proposal);
   VERIFY_TLS_RTT("ExternalInit", ExternalInit, external_init_proposal);
 
   VERIFY_TLS_RTT("Commit", Commit, commit);
 
-  VERIFY_TLS_RTT(
-    "AuthenticatedContent/App", AuthenticatedContent, content_auth_app);
-  VERIFY_TLS_RTT("AuthenticatedContent/Proposal",
-                 AuthenticatedContent,
-                 content_auth_proposal);
-  VERIFY_TLS_RTT(
-    "AuthenticatedContent/Commit", AuthenticatedContent, content_auth_commit);
-
-  auto require_pt = [](const MLSMessage& msg) {
-    return msg.wire_format() == WireFormat::mls_plaintext;
-  };
-  auto require_ct = [](const MLSMessage& msg) {
-    return msg.wire_format() == WireFormat::mls_ciphertext;
-  };
-
-  VERIFY_TLS_RTT_VAL(
-    "MLSMessage/PublicMessage", MLSMessage, mls_plaintext, require_pt);
-  VERIFY_TLS_RTT_VAL(
-    "MLSMessage/PrivateMessage", MLSMessage, mls_ciphertext, require_ct);
+  VERIFY_TLS_RTT_VAL("Public(Proposal)",
+                     MLSMessage,
+                     public_message_proposal,
+                     require_format(WireFormat::mls_plaintext));
+  VERIFY_TLS_RTT_VAL("Public(Commit)",
+                     MLSMessage,
+                     public_message_commit,
+                     require_format(WireFormat::mls_plaintext));
+  VERIFY_TLS_RTT_VAL("PrivateMessage",
+                     MLSMessage,
+                     private_message,
+                     require_format(WireFormat::mls_ciphertext));
 
   return std::nullopt;
 }
