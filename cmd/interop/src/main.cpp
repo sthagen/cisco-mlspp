@@ -22,28 +22,48 @@ static constexpr uint64_t SECRET_TREE = 11;
 static constexpr uint64_t MESSAGE_PROTECTION = 12;
 static constexpr uint64_t PSK_SECRET = 13;
 static constexpr uint64_t WELCOME = 14;
+static constexpr uint64_t TREE_HASHES = 15;
+static constexpr uint64_t TREE_OPERATIONS = 16;
 
-// XXX(RLB): This function currently produces only one example of each type, as
-// a top-level object, not a top-level array.  We should produce a more
-// comprehensive matrix.
 static json
 make_test_vector(uint64_t type)
 {
-  // TODO read parameters from the command line
-  auto suite = mls::CipherSuite::ID::X25519_AES128GCM_SHA256_Ed25519;
   auto n = uint32_t(5);
   switch (type) {
     case TestVectorType::TREE_MATH:
       return TreeMathTestVector{ n };
 
-    case TestVectorType::KEY_SCHEDULE:
-      return KeyScheduleTestVector{ suite, n };
+    case TestVectorType::KEY_SCHEDULE: {
+      auto cases = std::vector<KeyScheduleTestVector>();
 
-    case TestVectorType::TRANSCRIPT:
-      return TranscriptTestVector{ suite };
+      for (const auto& suite : mls::all_supported_suites) {
+        cases.emplace_back(suite, n);
+      }
 
-    case TestVectorType::TREEKEM:
-      return TreeKEMTestVector{ suite, n };
+      return cases;
+    }
+
+    case TestVectorType::TRANSCRIPT: {
+      auto cases = std::vector<TranscriptTestVector>();
+
+      for (const auto& suite : mls::all_supported_suites) {
+        cases.emplace_back(suite);
+      }
+
+      return cases;
+    }
+
+    case TestVectorType::TREEKEM: {
+      auto cases = std::vector<TreeKEMTestVector>();
+
+      for (const auto& suite : mls::all_supported_suites) {
+        for (const auto& tree_structure : treekem_test_tree_structures) {
+          cases.emplace_back(suite, tree_structure);
+        }
+      }
+
+      return cases;
+    }
 
     case TestVectorType::MESSAGES:
       return std::vector<MessagesTestVector>{
@@ -101,6 +121,29 @@ make_test_vector(uint64_t type)
       return cases;
     }
 
+    case TREE_HASHES: {
+      auto cases = std::vector<TreeHashTestVector>();
+
+      for (const auto& suite : mls::all_supported_suites) {
+        for (const auto& tree_structure : all_tree_structures) {
+          cases.emplace_back(suite, tree_structure);
+        }
+      }
+
+      return cases;
+    }
+
+    case TREE_OPERATIONS: {
+      auto cases = std::vector<TreeOperationsTestVector>();
+
+      auto suite = mls::CipherSuite::ID::X25519_AES128GCM_SHA256_Ed25519;
+      for (auto scenario : TreeOperationsTestVector::all_scenarios) {
+        cases.emplace_back(suite, scenario);
+      }
+
+      return cases;
+    }
+
     default:
       return nullptr;
   }
@@ -145,10 +188,10 @@ verify_test_vector(uint64_t type)
       return verify_test_vector<KeyScheduleTestVector>(j);
 
     case TestVectorType::TRANSCRIPT:
-      return j.get<TranscriptTestVector>().verify();
+      return verify_test_vector<TranscriptTestVector>(j);
 
     case TestVectorType::TREEKEM:
-      return j.get<TreeKEMTestVector>().verify();
+      return verify_test_vector<TreeKEMTestVector>(j);
 
     case TestVectorType::MESSAGES:
       return verify_test_vector<MessagesTestVector>(j);
@@ -167,6 +210,12 @@ verify_test_vector(uint64_t type)
 
     case WELCOME:
       return verify_test_vector<WelcomeTestVector>(j);
+
+    case TREE_OPERATIONS:
+      return verify_test_vector<TreeOperationsTestVector>(j);
+
+    case TREE_HASHES:
+      return verify_test_vector<TreeHashTestVector>(j);
 
     default:
       return "Invalid test vector type";

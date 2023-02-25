@@ -1,4 +1,4 @@
-name: Build and Test
+name: Build and Test (OpenSSL 3)
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
     branches:
       - main
   schedule:
-    - cron: '30 2 * * 1'
+    - cron: '30 3 * * 1'
 
 env:
   CTEST_OUTPUT_ON_FAILURE: 1
@@ -23,14 +23,17 @@ jobs:
         include:
             - os: windows-latest
               vcpkg-cmake-file: "$env:VCPKG_INSTALLATION_ROOT\\scripts\\buildsystems\\vcpkg.cmake"
+              ossl3-vcpkg-dir: "alternatives\\openssl_3"
               ctest-target: RUN_TESTS
             - os: ubuntu-latest
               vcpkg-cmake-file: "$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+              ossl3-vcpkg-dir: "alternatives/openssl_3"
               ctest-target: test
             - os: macos-latest
               vcpkg-cmake-file: "$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+              ossl3-vcpkg-dir: "alternatives/openssl_3"
               ctest-target: test
-     
+
     env:
       CMAKE_BUILD_DIR: ${{ github.workspace }}/build
       CMAKE_TEST_DIR: ${{ github.workspace }}/build/test
@@ -52,9 +55,9 @@ jobs:
             ${{ env.CMAKE_BUILD_DIR }}/vcpkg_installed
         key: ${{ runner.os }}-${{ hashFiles( '**/vcpkg.json' ) }}
 
-    - name: Configure to use clang-tidy and sanitizers      
+    - name: Configure to use clang-tidy and sanitizers
       run: |
-        cmake -B "${{ env.CMAKE_BUILD_DIR }}" -DTESTING=ON -DCLANG_TIDY=ON -DSANITIZERS=ON -DCMAKE_TOOLCHAIN_FILE="${{ matrix.vcpkg-cmake-file}}" .
+        cmake -B "${{ env.CMAKE_BUILD_DIR }}" -DTESTING=ON -DCLANG_TIDY=ON -DSANITIZERS=ON -DVCPKG_MANIFEST_DIR="${{ matrix.ossl3-vcpkg-dir }}" -DCMAKE_TOOLCHAIN_FILE="${{ matrix.vcpkg-cmake-file}}" .
 
     - name: Build
       run: |
