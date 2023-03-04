@@ -64,8 +64,8 @@ TEST_CASE_FIXTURE(TreeKEMTest, "TreeKEM Private Key")
   const auto index = LeafIndex{ 2 };
   const auto intersect = NodeIndex{ 3 };
   const auto random = random_bytes(32);
-  const auto random2 = random_bytes(32);
   const auto priv = HPKEPrivateKey::derive(suite, random);
+  const auto priv2 = HPKEPrivateKey::generate(suite);
   const auto hash_size = suite.digest().hash_size;
 
   // Create a tree with N blank leaves
@@ -101,9 +101,9 @@ TEST_CASE_FIXTURE(TreeKEMTest, "TreeKEM Private Key")
   REQUIRE(priv_joiner.update_secret.size() == hash_size);
   auto last_update_secret = priv_joiner.update_secret;
 
-  // set_leaf_secret() properly sets the leaf secret
-  priv_joiner.set_leaf_secret(random2);
-  REQUIRE(priv_joiner.path_secrets.find(NodeIndex(index))->second == random2);
+  // set_leaf_priv() properly sets the leaf secret
+  priv_joiner.set_leaf_priv(priv2);
+  REQUIRE(priv_joiner.private_key(NodeIndex(index)) == priv2);
   REQUIRE(priv_joiner.update_secret.size() == hash_size);
   REQUIRE(priv_joiner.update_secret == last_update_secret);
 
@@ -229,10 +229,8 @@ TEST_CASE_FIXTURE(TreeKEMTest, "TreeKEM encap/decap")
 
     auto leaf_secret = random_bytes(32);
     pubs[i].set_hash_all();
-    auto [new_adder_priv, path_] = pubs[i].encap(
-      adder, group_id, context, leaf_secret, sig_privs[i], {}, {});
-    auto path = path_;
-    privs[i] = new_adder_priv;
+    privs[i] = pubs[i].update(adder, leaf_secret, group_id, sig_privs[i], {});
+    auto path = pubs[i].encap(privs[i], context, {});
     REQUIRE(pubs[i].parent_hash_valid(adder, path));
 
     auto [overlap, path_secret, ok_] = privs[i].shared_path_secret(joiner);

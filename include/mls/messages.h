@@ -249,6 +249,7 @@ struct Welcome
 
 private:
   bytes _joiner_secret;
+  PreSharedKeys _psks;
   static KeyAndNonce group_info_key_nonce(
     CipherSuite suite,
     const bytes& joiner_secret,
@@ -382,7 +383,7 @@ struct Commit
   std::vector<ProposalOrRef> proposals;
   std::optional<UpdatePath> path;
 
-  // Validate that the commit is accepable as an external commit, and if so,
+  // Validate that the commit is acceptable as an external commit, and if so,
   // produce the public key from the ExternalInit proposal
   std::optional<bytes> valid_external() const;
 

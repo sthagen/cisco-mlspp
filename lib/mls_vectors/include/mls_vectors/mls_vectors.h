@@ -523,4 +523,38 @@ struct MessagesTestVector : PseudoRandom
   std::optional<std::string> verify() const;
 };
 
+struct PassiveClientTestVector : PseudoRandom
+{
+  struct PSK
+  {
+    bytes psk_id;
+    bytes psk;
+  };
+
+  struct Epoch
+  {
+    std::vector<mls::MLSMessage> proposals;
+    mls::MLSMessage commit;
+    bytes epoch_authenticator;
+  };
+
+  mls::CipherSuite cipher_suite;
+
+  mls::MLSMessage key_package;
+  mls::SignaturePrivateKey signature_priv;
+  mls::HPKEPrivateKey encryption_priv;
+  mls::HPKEPrivateKey init_priv;
+
+  std::vector<PSK> external_psks;
+
+  mls::MLSMessage welcome;
+  std::optional<mls::TreeKEMPublicKey> ratchet_tree;
+  bytes initial_epoch_authenticator;
+
+  std::vector<Epoch> epochs;
+
+  PassiveClientTestVector() = default;
+  std::optional<std::string> verify();
+};
+
 } // namespace mls_vectors

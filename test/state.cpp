@@ -137,8 +137,13 @@ TEST_CASE_FIXTURE(StateTest, "Two Person")
   auto first1 = first1_;
 
   // Initialize the second participant from the Welcome
-  auto second0 = State{ init_privs[1],   leaf_privs[1], identity_privs[1],
-                        key_packages[1], welcome,       std::nullopt };
+  auto second0 = State{ init_privs[1],
+                        leaf_privs[1],
+                        identity_privs[1],
+                        key_packages[1],
+                        welcome,
+                        std::nullopt,
+                        {} };
   REQUIRE(first1 == second0);
 
   auto group = std::vector<State>{ first1, second0 };
@@ -165,8 +170,13 @@ TEST_CASE_FIXTURE(StateTest, "Two Person with New Member Add")
   auto first1 = first1_;
 
   // Initialize the second participant from the Welcome
-  auto second0 = State{ init_privs[1],   leaf_privs[1], identity_privs[1],
-                        key_packages[1], welcome,       std::nullopt };
+  auto second0 = State{ init_privs[1],
+                        leaf_privs[1],
+                        identity_privs[1],
+                        key_packages[1],
+                        welcome,
+                        std::nullopt,
+                        {} };
   REQUIRE(first1 == second0);
 
   auto group = std::vector<State>{ first1, second0 };
@@ -205,8 +215,13 @@ TEST_CASE_FIXTURE(StateTest, "Two Person with External Proposal")
   auto first1 = first1_;
 
   // Initialize the second participant from the Welcome
-  auto second0 = State{ init_privs[1],   leaf_privs[1], identity_privs[1],
-                        key_packages[1], welcome,       std::nullopt };
+  auto second0 = State{ init_privs[1],
+                        leaf_privs[1],
+                        identity_privs[1],
+                        key_packages[1],
+                        welcome,
+                        std::nullopt,
+                        {} };
   REQUIRE(first1 == second0);
 
   auto group = std::vector<State>{ first1, second0 };
@@ -234,8 +249,13 @@ TEST_CASE_FIXTURE(StateTest, "Two Person with custom extensions")
   silence_unused(commit1);
 
   // Initialize the second participant from the Welcome
-  auto second1 = State{ init_privs[1],   leaf_privs[1], identity_privs[1],
-                        key_packages[1], welcome1,      std::nullopt };
+  auto second1 = State{ init_privs[1],
+                        leaf_privs[1],
+                        identity_privs[1],
+                        key_packages[1],
+                        welcome1,
+                        std::nullopt,
+                        {} };
   REQUIRE(first1 == second1);
   REQUIRE(first1.extensions() == first_exts);
 
@@ -283,7 +303,8 @@ TEST_CASE_FIXTURE(StateTest, "Two Person with external tree for welcome")
                         identity_privs[1],
                         key_packages[1],
                         welcome,
-                        std::nullopt),
+                        std::nullopt,
+                        {}),
                   InvalidParameterError);
 
   auto incorrect_tree = TreeKEMPublicKey(suite);
@@ -294,15 +315,54 @@ TEST_CASE_FIXTURE(StateTest, "Two Person with external tree for welcome")
                         identity_privs[1],
                         key_packages[1],
                         welcome,
-                        incorrect_tree),
+                        incorrect_tree,
+                        {}),
                   InvalidParameterError);
 
-  auto second0 = State{ init_privs[1],   leaf_privs[1], identity_privs[1],
-                        key_packages[1], welcome,       first1.tree() };
+  auto second0 = State{ init_privs[1],
+                        leaf_privs[1],
+                        identity_privs[1],
+                        key_packages[1],
+                        welcome,
+                        first1.tree(),
+                        {} };
   REQUIRE(first1 == second0);
 
   auto group = std::vector<State>{ first1, second0 };
   verify_group_functionality(group);
+}
+
+TEST_CASE_FIXTURE(StateTest, "Two Person with PSK")
+{
+  const auto psk_id = from_ascii("external psk");
+  const auto psk_secret = from_ascii("super secret");
+  const auto psks = std::map<bytes, bytes>{ { psk_id, psk_secret } };
+
+  // Initialize the creator's state
+  auto first0 = State{ group_id,
+                       suite,
+                       leaf_privs[0],
+                       identity_privs[0],
+                       key_packages[0].leaf_node,
+                       {} };
+
+  // Install the PSK on the creator
+  first0.add_external_psk(psk_id, psk_secret);
+
+  // Create a Commit over Add and PSK proposals
+  auto add = first0.add_proposal(key_packages[1]);
+  auto psk = first0.pre_shared_key_proposal(psk_id);
+  auto [commit, welcome, first1_] = first0.commit(
+    fresh_secret(), CommitOpts{ { add, psk }, true, false, {} }, {});
+  silence_unused(commit);
+  auto first1 = first1_;
+
+  // Initialize the second participant from the Welcome
+  auto second0 = State{
+    init_privs[1], leaf_privs[1], identity_privs[1], key_packages[1], welcome,
+    std::nullopt,  psks
+  };
+  REQUIRE(first1 == second0);
 }
 
 TEST_CASE_FIXTURE(StateTest, "External Join")
@@ -383,7 +443,7 @@ TEST_CASE_FIXTURE(StateTest, "SFrame Parameter Negotiation")
   auto first1 = first1_;
   silence_unused(commit);
 
-  auto second0 = State{ init1, leaf1, id1, kp1, welcome, std::nullopt };
+  auto second0 = State{ init1, leaf1, id1, kp1, welcome, std::nullopt, {} };
   REQUIRE(first1 == second0);
 
   auto group = std::vector<State>{ first1, second0 };
@@ -479,12 +539,13 @@ TEST_CASE_FIXTURE(StateTest, "Add Multiple Members")
 
   // Initialize the new joiners from the welcome
   for (size_t i = 1; i < group_size; i += 1) {
-    states.emplace_back(init_privs[i],
-                        leaf_privs[i],
-                        identity_privs[i],
-                        key_packages[i],
-                        welcome,
-                        std::nullopt);
+    states.push_back({ init_privs[i],
+                       leaf_privs[i],
+                       identity_privs[i],
+                       key_packages[i],
+                       welcome,
+                       std::nullopt,
+                       {} });
   }
 
   verify_group_functionality(states);
@@ -515,12 +576,13 @@ TEST_CASE_FIXTURE(StateTest, "Full Size Group")
       }
     }
 
-    states.emplace_back(init_privs[i],
-                        leaf_privs[i],
-                        identity_privs[i],
-                        key_packages[i],
-                        welcome,
-                        std::nullopt);
+    states.push_back({ init_privs[i],
+                       leaf_privs[i],
+                       identity_privs[i],
+                       key_packages[i],
+                       welcome,
+                       std::nullopt,
+                       {} });
 
     // Check that everyone ended up in the same place
     for (const auto& state : states) {
@@ -555,12 +617,13 @@ protected:
     silence_unused(commit);
     states[0] = new_state;
     for (size_t i = 1; i < group_size; i += 1) {
-      states.emplace_back(init_privs[i],
-                          leaf_privs[i],
-                          identity_privs[i],
-                          key_packages[i],
-                          welcome,
-                          std::nullopt);
+      states.push_back({ init_privs[i],
+                         leaf_privs[i],
+                         identity_privs[i],
+                         key_packages[i],
+                         welcome,
+                         std::nullopt,
+                         {} });
     }
 
     check_consistency();
@@ -598,16 +661,48 @@ TEST_CASE_FIXTURE(RunningGroupTest, "Update Everyone via Empty Commit")
 TEST_CASE_FIXTURE(RunningGroupTest, "Update Everyone in a Group")
 {
   for (size_t i = 0; i < group_size; i += 1) {
-    auto new_leaf = fresh_secret();
-    auto update = states[i].update_proposal(new_leaf, {});
+    auto committer_index = (i + 1) % group_size;
+    auto& updater = states.at(i);
+    auto& committer = states.at(committer_index);
+
+    auto update_priv = HPKEPrivateKey::generate(suite);
+    auto update = updater.update(std::move(update_priv), {}, {});
+
+    committer.handle(update);
     auto [commit, welcome, new_state] =
-      states[i].commit(new_leaf, CommitOpts{ { update }, true, false, {} }, {});
+      committer.commit(fresh_secret(), {}, {});
+    silence_unused(welcome);
+
+    for (auto& state : states) {
+      if (state.index().val == committer_index) {
+        state = new_state;
+      } else {
+        state.handle(update);
+        state = opt::get(state.handle(commit));
+      }
+    }
+
+    check_consistency();
+  }
+}
+
+TEST_CASE_FIXTURE(RunningGroupTest, "Add a PSK from Everyone in a Group")
+{
+  for (uint32_t i = 0; i < group_size; i += 1) {
+    auto psk_id = tls::marshal(i);
+    auto psk_secret = suite.derive_secret(psk_id, "psk secret");
+    states[i].add_external_psk(psk_id, psk_secret);
+
+    auto psk = states[i].pre_shared_key_proposal(psk_id);
+    auto [commit, welcome, new_state] = states[i].commit(
+      fresh_secret(), CommitOpts{ { psk }, false, false, {} }, {});
     silence_unused(welcome);
 
     for (auto& state : states) {
       if (state.index().val == i) {
         state = new_state;
       } else {
+        state.add_external_psk(psk_id, psk_secret);
         state = opt::get(state.handle(commit));
       }
     }
@@ -621,7 +716,7 @@ TEST_CASE_FIXTURE(RunningGroupTest, "Remove Members from a Group")
   for (uint32_t i = uint32_t(group_size) - 2; i > 0; i -= 1) {
     auto remove = states[i].remove_proposal(LeafIndex{ i + 1 });
     auto [commit, welcome, new_state] = states[i].commit(
-      fresh_secret(), CommitOpts{ { remove }, true, false, {} }, {});
+      fresh_secret(), CommitOpts{ { remove }, false, false, {} }, {});
     silence_unused(welcome);
 
     states.pop_back();
@@ -685,5 +780,147 @@ TEST_CASE_FIXTURE(RunningGroupTest, "Roster Updates")
     states[i] = opt::get(states[i].handle(commit_1));
     states[i] = opt::get(states[i].handle(commit_2));
     REQUIRE(expected_creds == get_creds(states[i].roster()));
+  }
+}
+
+class RelatedGroupTest : public RunningGroupTest
+{
+protected:
+  std::vector<HPKEPrivateKey> new_init_privs;
+  std::vector<HPKEPrivateKey> new_leaf_privs;
+  std::vector<SignaturePrivateKey> new_identity_privs;
+  std::vector<KeyPackage> new_key_packages;
+
+  RelatedGroupTest()
+  {
+    for (size_t i = 0; i < group_size; i += 1) {
+      auto [init_priv, leaf_priv, identity_priv, key_package] = make_client();
+      new_init_privs.push_back(init_priv);
+      new_leaf_privs.push_back(leaf_priv);
+      new_identity_privs.push_back(identity_priv);
+      new_key_packages.push_back(key_package);
+    }
+  }
+};
+
+TEST_CASE_FIXTURE(RelatedGroupTest, "Branch the group")
+{
+  // Note the epoch authenticator before we branch
+  auto original_epoch_authenticator = states[0].epoch_authenticator();
+
+  // Member 0 generates a Branch welcome
+  auto new_states = std::vector<State>{};
+
+  auto branch_key_packages = std::vector<KeyPackage>(
+    new_key_packages.begin() + 1, new_key_packages.end());
+  auto [new_state_0, welcome] =
+    states[0].create_branch(from_ascii("branched group"),
+                            new_leaf_privs[0],
+                            new_identity_privs[0],
+                            new_key_packages[0].leaf_node,
+                            {},
+                            branch_key_packages,
+                            random_bytes(suite.secret_size()),
+                            {});
+
+  new_states.push_back(std::move(new_state_0));
+  auto tree = new_states[0].tree();
+
+  // The other members process the welcome
+  for (uint32_t i = 1; i < group_size; i++) {
+    auto new_state = states[i].handle_branch(new_init_privs[i],
+                                             new_leaf_privs[i],
+                                             new_identity_privs[i],
+                                             new_key_packages[i],
+                                             welcome,
+                                             tree);
+    new_states.push_back(new_state);
+  }
+
+  // Verify that the old group is unperturbed
+  verify_group_functionality(states);
+  for (const auto& state : states) {
+    REQUIRE(state.epoch_authenticator() == original_epoch_authenticator);
+  }
+
+  // Verify that the new group works
+  verify_group_functionality(new_states);
+  for (const auto& state : new_states) {
+    REQUIRE(state == new_states[0]);
+    REQUIRE(state.epoch_authenticator() != original_epoch_authenticator);
+  }
+}
+
+TEST_CASE_FIXTURE(RelatedGroupTest, "Reinitialize the group")
+{
+  // Member 0 proposes reinitialization with a new group ID
+  auto new_group_id = from_ascii("reinitialized group");
+  auto reinit_proposal =
+    states[0].reinit(new_group_id, ProtocolVersion::mls10, suite, {}, {});
+  for (auto& state : states) {
+    state.handle(reinit_proposal);
+  }
+
+  // Member 1 generates a ReInit Commit
+  auto leaf_secret = random_bytes(suite.secret_size());
+  auto [tombstone_1, reinit_commit] =
+    states[1].reinit_commit(leaf_secret, {}, {});
+
+  // The other members process the ReInit Commit
+  auto tombstones = std::vector<State::Tombstone>{};
+  for (uint32_t i = 0; i < group_size; i++) {
+    if (i == 1) {
+      tombstones.push_back(tombstone_1);
+      continue;
+    }
+
+    auto tombstone = states[i].handle_reinit_commit(reinit_commit);
+    tombstones.push_back(tombstone);
+  }
+
+  for (const auto& tombstone : tombstones) {
+    REQUIRE(tombstone == tombstones[0]);
+  }
+
+  // Member 2 generates a Welcome message
+  auto reinit_key_packages = std::vector<KeyPackage>{};
+  for (uint32_t i = 0; i < group_size; i++) {
+    if (i == 2) {
+      continue;
+    }
+
+    reinit_key_packages.push_back(new_key_packages[i]);
+  }
+
+  auto [new_state_2, welcome] =
+    tombstones[2].create_welcome(new_leaf_privs[2],
+                                 new_identity_privs[2],
+                                 new_key_packages[2].leaf_node,
+                                 reinit_key_packages,
+                                 random_bytes(suite.secret_size()),
+                                 {});
+  auto tree = new_state_2.tree();
+
+  // The other members process the Welcome
+  auto new_states = std::vector<State>{};
+  for (uint32_t i = 0; i < group_size; i++) {
+    if (i == 2) {
+      new_states.push_back(new_state_2);
+      continue;
+    }
+
+    auto new_state = tombstones[i].handle_welcome(new_init_privs[i],
+                                                  new_leaf_privs[i],
+                                                  new_identity_privs[i],
+                                                  new_key_packages[i],
+                                                  welcome,
+                                                  tree);
+    new_states.push_back(new_state);
+  }
+
+  // Verify that the new group works
+  verify_group_functionality(new_states);
+  for (const auto& state : new_states) {
+    REQUIRE(state == new_states[0]);
   }
 }

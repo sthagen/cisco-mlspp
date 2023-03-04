@@ -41,7 +41,7 @@ public:
   // Initialize an empty group
   State(bytes group_id,
         CipherSuite suite,
-        const HPKEPrivateKey& init_priv,
+        HPKEPrivateKey enc_priv,
         SignaturePrivateKey sig_priv,
         const LeafNode& leaf_node,
         ExtensionList extensions);
@@ -50,9 +50,10 @@ public:
   State(const HPKEPrivateKey& init_priv,
         HPKEPrivateKey leaf_priv,
         SignaturePrivateKey sig_priv,
-        const KeyPackage& kp,
+        const KeyPackage& key_package,
         const Welcome& welcome,
-        const std::optional<TreeKEMPublicKey>& tree);
+        const std::optional<TreeKEMPublicKey>& tree,
+        std::map<bytes, bytes> psks);
 
   // Join a group from outside
   // XXX(RLB) To be fully general, we would need a few more options here, e.g.,
@@ -60,7 +61,7 @@ public:
   static std::tuple<MLSMessage, State> external_join(
     const bytes& leaf_secret,
     SignaturePrivateKey sig_priv,
-    const KeyPackage& kp,
+    const KeyPackage& key_package,
     const GroupInfo& group_info,
     const std::optional<TreeKEMPublicKey>& tree,
     const MessageOpts& msg_opts);
@@ -76,20 +77,32 @@ public:
   ///
 
   Proposal add_proposal(const KeyPackage& key_package) const;
-  Proposal update_proposal(const bytes& leaf_secret,
+  Proposal update_proposal(HPKEPrivateKey leaf_priv,
                            const LeafNodeOptions& opts);
   Proposal remove_proposal(RosterIndex index) const;
   Proposal remove_proposal(LeafIndex removed) const;
   Proposal group_context_extensions_proposal(ExtensionList exts) const;
+  Proposal pre_shared_key_proposal(const bytes& external_psk_id) const;
+  static Proposal reinit_proposal(bytes group_id,
+                                  ProtocolVersion version,
+                                  CipherSuite cipher_suite,
+                                  ExtensionList extensions);
 
   MLSMessage add(const KeyPackage& key_package, const MessageOpts& msg_opts);
-  MLSMessage update(const bytes& leaf_secret,
+  MLSMessage update(HPKEPrivateKey leaf_priv,
                     const LeafNodeOptions& opts,
                     const MessageOpts& msg_opts);
   MLSMessage remove(RosterIndex index, const MessageOpts& msg_opts);
   MLSMessage remove(LeafIndex removed, const MessageOpts& msg_opts);
   MLSMessage group_context_extensions(ExtensionList exts,
                                       const MessageOpts& msg_opts);
+  MLSMessage pre_shared_key(const bytes& external_psk_id,
+                            const MessageOpts& msg_opts);
+  MLSMessage reinit(bytes group_id,
+                    ProtocolVersion version,
+                    CipherSuite cipher_suite,
+                    ExtensionList extensions,
+                    const MessageOpts& msg_opts);
 
   std::tuple<MLSMessage, Welcome, State> commit(
     const bytes& leaf_secret,
@@ -101,7 +114,12 @@ public:
   ///
   std::optional<State> handle(const MLSMessage& msg);
   std::optional<State> handle(const MLSMessage& msg,
-                              std::optional<State> cached);
+                              std::optional<State> cached_state);
+  ///
+  /// PSK management
+  ///
+  void add_external_psk(const bytes& id, const bytes& secret);
+  void remove_external_psk(const bytes& id);
 
   ///
   /// Accessors
@@ -133,6 +151,60 @@ public:
   // Assemble a group context for this state
   GroupContext group_context() const;
 
+  // Subgroup branching
+  std::tuple<State, Welcome> create_branch(
+    bytes group_id,
+    HPKEPrivateKey enc_priv,
+    SignaturePrivateKey sig_priv,
+    const LeafNode& leaf_node,
+    ExtensionList extensions,
+    const std::vector<KeyPackage>& key_packages,
+    const bytes& leaf_secret,
+    const CommitOpts& commit_opts) const;
+  State handle_branch(const HPKEPrivateKey& init_priv,
+                      HPKEPrivateKey enc_priv,
+                      SignaturePrivateKey sig_priv,
+                      const KeyPackage& key_package,
+                      const Welcome& welcome,
+                      const std::optional<TreeKEMPublicKey>& tree) const;
+
+  // Reinitialization
+  struct Tombstone
+  {
+    std::tuple<State, Welcome> create_welcome(
+      HPKEPrivateKey enc_priv,
+      SignaturePrivateKey sig_priv,
+      const LeafNode& leaf_node,
+      const std::vector<KeyPackage>& key_packages,
+      const bytes& leaf_secret,
+      const CommitOpts& commit_opts) const;
+    State handle_welcome(const HPKEPrivateKey& init_priv,
+                         HPKEPrivateKey enc_priv,
+                         SignaturePrivateKey sig_priv,
+                         const KeyPackage& key_package,
+                         const Welcome& welcome,
+                         const std::optional<TreeKEMPublicKey>& tree) const;
+
+    TLS_SERIALIZABLE(prior_group_id, prior_epoch, resumption_psk, reinit);
+
+  private:
+    Tombstone(const State& state_in, ReInit reinit_in);
+
+    bytes prior_group_id;
+    epoch_t prior_epoch;
+    bytes resumption_psk;
+
+    ReInit reinit;
+
+    friend class State;
+  };
+
+  std::tuple<Tombstone, MLSMessage> reinit_commit(
+    const bytes& leaf_secret,
+    const std::optional<CommitOpts>& opts,
+    const MessageOpts& msg_opts);
+  Tombstone handle_reinit_commit(const MLSMessage& commit);
+
 protected:
   // Shared confirmed state
   // XXX(rlb@ipv.sx): Can these be made const?
@@ -152,6 +224,12 @@ protected:
   LeafIndex _index;
   SignaturePrivateKey _identity_priv;
 
+  // Storage for PSKs
+  std::map<bytes, bytes> _external_psks;
+
+  using EpochRef = std::tuple<bytes, epoch_t>;
+  std::map<EpochRef, bytes> _resumption_psks;
+
   // Cache of Proposals and update secrets
   struct CachedProposal
   {
@@ -163,7 +241,7 @@ protected:
 
   struct CachedUpdate
   {
-    bytes update_secret;
+    HPKEPrivateKey update_priv;
     Update proposal;
   };
   std::optional<CachedUpdate> _cached_update;
@@ -173,17 +251,59 @@ protected:
         const GroupInfo& group_info,
         const std::optional<TreeKEMPublicKey>& tree);
 
+  // Assemble a group from a Welcome, allowing for resumption PSKs
+  State(const HPKEPrivateKey& init_priv,
+        HPKEPrivateKey leaf_priv,
+        SignaturePrivateKey sig_priv,
+        const KeyPackage& key_package,
+        const Welcome& welcome,
+        const std::optional<TreeKEMPublicKey>& tree,
+        std::map<bytes, bytes> external_psks,
+        std::map<EpochRef, bytes> resumption_psks);
+
   // Import a tree from an externally-provided tree or an extension
   TreeKEMPublicKey import_tree(const bytes& tree_hash,
                                const std::optional<TreeKEMPublicKey>& external,
                                const ExtensionList& extensions);
 
+  // Form a commit, covering all the cases with slightly different validation
+  // rules:
+  // * Normal
+  // * External
+  // * Branch
+  // * Reinit
+  struct NormalCommitParams
+  {};
+
+  struct ExternalCommitParams
+  {
+    KeyPackage joiner_key_package;
+    bytes force_init_secret;
+  };
+
+  struct RestartCommitParams
+  {
+    ResumptionPSKUsage allowed_usage;
+  };
+
+  struct ReInitCommitParams
+  {};
+
+  using CommitParams = var::variant<NormalCommitParams,
+                                    ExternalCommitParams,
+                                    RestartCommitParams,
+                                    ReInitCommitParams>;
+
   std::tuple<MLSMessage, Welcome, State> commit(
     const bytes& leaf_secret,
     const std::optional<CommitOpts>& opts,
     const MessageOpts& msg_opts,
-    const std::optional<KeyPackage>& joiner_key_package,
-    const std::optional<HPKEPublicKey>& external_pub);
+    CommitParams params);
+
+  std::optional<State> handle(
+    const MLSMessage& msg,
+    std::optional<State> cached_state,
+    const std::optional<CommitParams>& expected_params);
 
   // Create an MLSMessage encapsulating some content
   template<typename Inner>
@@ -200,26 +320,23 @@ protected:
   AuthenticatedContent unprotect_to_content_auth(const MLSMessage& msg);
 
   // Apply the changes requested by various messages
-  void check_add_leaf_node(const LeafNode& leaf,
-                           std::optional<LeafIndex> except) const;
-  void check_update_leaf_node(LeafIndex target,
-                              const LeafNode& leaf,
-                              LeafNodeSource required_source) const;
   LeafIndex apply(const Add& add);
   void apply(LeafIndex target, const Update& update);
-  void apply(LeafIndex target, const Update& update, const bytes& leaf_secret);
+  void apply(LeafIndex target,
+             const Update& update,
+             const HPKEPrivateKey& leaf_priv);
   LeafIndex apply(const Remove& remove);
   void apply(const GroupContextExtensions& gce);
   std::vector<LeafIndex> apply(const std::vector<CachedProposal>& proposals,
                                Proposal::Type required_type);
-  std::tuple<bool, bool, std::vector<LeafIndex>> apply(
+  std::tuple<std::vector<LeafIndex>, std::vector<PSKWithSecret>> apply(
     const std::vector<CachedProposal>& proposals);
 
   // Verify that a specific key package or all members support a given set of
   // extensions
   bool extensions_supported(const ExtensionList& exts) const;
 
-  // Extract a proposal from the cache
+  // Extract proposals and PSKs from cache
   void cache_proposal(AuthenticatedContent content_auth);
   std::optional<CachedProposal> resolve(
     const ProposalOrRef& id,
@@ -227,6 +344,40 @@ protected:
   std::vector<CachedProposal> must_resolve(
     const std::vector<ProposalOrRef>& ids,
     std::optional<LeafIndex> sender_index) const;
+
+  void add_resumption_psk(bytes group_id, epoch_t epoch, bytes secret);
+  std::vector<PSKWithSecret> resolve(
+    const std::vector<PreSharedKeyID>& psks) const;
+
+  // Check properties of proposals
+  bool valid(const LeafNode& leaf_node,
+             LeafNodeSource required_source,
+             std::optional<LeafIndex> index) const;
+  bool valid(const KeyPackage& key_package) const;
+  bool valid(const Add& add) const;
+  bool valid(LeafIndex sender, const Update& update) const;
+  bool valid(const Remove& remove) const;
+  bool valid(const PreSharedKey& psk) const;
+  static bool valid(const ReInit& reinit);
+  bool valid(const ExternalInit& external_init) const;
+  bool valid(const GroupContextExtensions& gce) const;
+  bool valid(std::optional<LeafIndex> sender, const Proposal& proposal) const;
+
+  bool valid(const std::vector<CachedProposal>& proposals,
+             LeafIndex commit_sender,
+             const CommitParams& params) const;
+  bool valid_normal(const std::vector<CachedProposal>& proposals,
+                    LeafIndex commit_sender) const;
+  bool valid_external(const std::vector<CachedProposal>& proposals) const;
+  static bool valid_reinit(const std::vector<CachedProposal>& proposals);
+  static bool valid_restart(const std::vector<CachedProposal>& proposals,
+                            ResumptionPSKUsage allowed_usage);
+
+  CommitParams infer_commit_type(
+    const std::optional<LeafIndex>& sender,
+    const std::vector<CachedProposal>& proposals,
+    const std::optional<CommitParams>& expected_params) const;
+  static bool path_required(const std::vector<CachedProposal>& proposals);
 
   // Compare the **shared** attributes of the states
   friend bool operator==(const State& lhs, const State& rhs);

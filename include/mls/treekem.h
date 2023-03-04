@@ -70,7 +70,7 @@ struct TreeKEMPrivateKey
 
   static TreeKEMPrivateKey solo(CipherSuite suite,
                                 LeafIndex index,
-                                const HPKEPrivateKey& leaf_priv);
+                                HPKEPrivateKey leaf_priv);
   static TreeKEMPrivateKey create(const TreeKEMPublicKey& pub,
                                   LeafIndex from,
                                   const bytes& leaf_secret);
@@ -80,7 +80,7 @@ struct TreeKEMPrivateKey
                                   NodeIndex intersect,
                                   const std::optional<bytes>& path_secret);
 
-  void set_leaf_secret(const bytes& secret);
+  void set_leaf_priv(HPKEPrivateKey priv);
   std::tuple<NodeIndex, bytes, bool> shared_path_secret(LeafIndex to) const;
 
   bool have_private_key(NodeIndex n) const;
@@ -126,6 +126,15 @@ struct TreeKEMPublicKey
   void update_leaf(LeafIndex index, const LeafNode& leaf);
   void blank_path(LeafIndex index);
 
+  TreeKEMPrivateKey update(LeafIndex from,
+                           const bytes& leaf_secret,
+                           const bytes& group_id,
+                           const SignaturePrivateKey& sig_priv,
+                           const LeafNodeOptions& opts);
+  UpdatePath encap(const TreeKEMPrivateKey& priv,
+                   const bytes& context,
+                   const std::vector<LeafIndex>& except) const;
+
   void merge(LeafIndex from, const UpdatePath& path);
   void set_hash_all();
   const bytes& get_hash(NodeIndex index);
@@ -142,15 +151,6 @@ struct TreeKEMPublicKey
   using FilteredDirectPath =
     std::vector<std::tuple<NodeIndex, std::vector<NodeIndex>>>;
   FilteredDirectPath filtered_direct_path(NodeIndex index) const;
-
-  std::tuple<TreeKEMPrivateKey, UpdatePath> encap(
-    LeafIndex from,
-    const bytes& group_id,
-    const bytes& context,
-    const bytes& leaf_secret,
-    const SignaturePrivateKey& sig_priv,
-    const std::vector<LeafIndex>& except,
-    const LeafNodeOptions& opts);
 
   void truncate();
 
