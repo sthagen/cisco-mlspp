@@ -1,10 +1,9 @@
 #include <doctest/doctest.h>
 #include <mls/crypto.h>
 #include <mls_vectors/mls_vectors.h>
-
 #include <string>
 
-using namespace mls;
+using namespace MLS_NAMESPACE;
 using namespace mls_vectors;
 
 TEST_CASE("Basic HPKE")
@@ -88,6 +87,24 @@ TEST_CASE("Signature Key Serializion")
 
     auto gX2 = tls::get<SignaturePublicKey>(tls::marshal(gX));
     REQUIRE(gX2 == gX);
+  }
+}
+
+TEST_CASE("Signature Key JWK Import/Export")
+{
+  for (auto suite_id : all_supported_suites) {
+    const auto suite = CipherSuite{ suite_id };
+    const auto priv = SignaturePrivateKey::generate(suite);
+    const auto pub = priv.public_key;
+
+    const auto encoded_priv = priv.to_jwk(suite);
+    const auto decoded_priv =
+      SignaturePrivateKey::from_jwk(suite, encoded_priv);
+    REQUIRE(decoded_priv == priv);
+
+    const auto encoded_pub = pub.to_jwk(suite);
+    const auto decoded_pub = SignaturePublicKey::from_jwk(suite, encoded_pub);
+    REQUIRE(decoded_pub == pub);
   }
 }
 
