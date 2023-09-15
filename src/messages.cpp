@@ -351,7 +351,7 @@ AuthenticatedContent::sign(WireFormat wire_format,
                            const SignaturePrivateKey& sig_priv,
                            const std::optional<GroupContext>& context)
 {
-  if (wire_format == WireFormat::mls_plaintext &&
+  if (wire_format == WireFormat::mls_public_message &&
       content.content_type() == ContentType::application) {
     throw InvalidParameterError(
       "Application data cannot be sent as PublicMessage");
@@ -369,7 +369,7 @@ AuthenticatedContent::verify(CipherSuite suite,
                              const SignaturePublicKey& sig_pub,
                              const std::optional<GroupContext>& context) const
 {
-  if (wire_format == WireFormat::mls_plaintext &&
+  if (wire_format == WireFormat::mls_public_message &&
       content.content_type() == ContentType::application) {
     return false;
   }
@@ -545,7 +545,7 @@ PublicMessage::unprotect(CipherSuite suite,
   }
 
   return AuthenticatedContent{
-    WireFormat::mls_plaintext,
+    WireFormat::mls_public_message,
     content,
     auth,
   };
@@ -561,7 +561,7 @@ AuthenticatedContent
 PublicMessage::authenticated_content() const
 {
   auto auth_content = AuthenticatedContent{};
-  auth_content.wire_format = WireFormat::mls_plaintext;
+  auth_content.wire_format = WireFormat::mls_public_message;
   auth_content.content = content;
   auth_content.auth = auth;
   return auth_content;
@@ -571,7 +571,7 @@ PublicMessage::PublicMessage(AuthenticatedContent content_auth)
   : content(std::move(content_auth.content))
   , auth(std::move(content_auth.auth))
 {
-  if (content_auth.wire_format != WireFormat::mls_plaintext) {
+  if (content_auth.wire_format != WireFormat::mls_public_message) {
     throw InvalidParameterError("Wire format mismatch (not mls_plaintext)");
   }
 }
@@ -590,7 +590,7 @@ PublicMessage::membership_mac(CipherSuite suite,
                               const std::optional<GroupContext>& context) const
 {
   auto tbm = tls::marshal(GroupContentTBM{
-    { WireFormat::mls_plaintext, content, context },
+    { WireFormat::mls_public_message, content, context },
     auth,
   });
 
@@ -628,6 +628,19 @@ operator>>(tls::istream& str, PublicMessage& obj)
   }
 
   return str;
+}
+
+bool
+operator==(const PublicMessage& lhs, const PublicMessage& rhs)
+{
+  return lhs.content == rhs.content && lhs.auth == rhs.auth &&
+         lhs.membership_tag == rhs.membership_tag;
+}
+
+bool
+operator!=(const PublicMessage& lhs, const PublicMessage& rhs)
+{
+  return !(lhs == rhs);
 }
 
 static bytes
@@ -800,7 +813,7 @@ PrivateMessage::unprotect(CipherSuite suite,
   unmarshal_ciphertext_content(opt::get(content_pt), content, auth);
 
   return AuthenticatedContent{
-    WireFormat::mls_ciphertext,
+    WireFormat::mls_private_message,
     std::move(content),
     std::move(auth),
   };
@@ -838,13 +851,13 @@ MLSMessage::wire_format() const
   return tls::variant<WireFormat>::type(message);
 }
 
-MLSMessage::MLSMessage(PublicMessage mls_plaintext)
-  : message(std::move(mls_plaintext))
+MLSMessage::MLSMessage(PublicMessage public_message)
+  : message(std::move(public_message))
 {
 }
 
-MLSMessage::MLSMessage(PrivateMessage mls_ciphertext)
-  : message(std::move(mls_ciphertext))
+MLSMessage::MLSMessage(PrivateMessage private_message)
+  : message(std::move(private_message))
 {
 }
 
@@ -893,7 +906,7 @@ external_proposal(CipherSuite suite,
                                { /* no authenticated data */ },
                                { proposal } };
   auto content_auth = AuthenticatedContent::sign(
-    WireFormat::mls_plaintext, std::move(content), suite, sig_priv, {});
+    WireFormat::mls_public_message, std::move(content), suite, sig_priv, {});
 
   return PublicMessage::protect(std::move(content_auth), suite, {}, {});
 }

@@ -1,5 +1,6 @@
-#include "mls/credential.h"
-#include "hpke/certificate.h"
+#include <hpke/certificate.h>
+#include <hpke/userinfo_vc.h>
+#include <mls/credential.h>
 #include <namespace.h>
 #include <tls/tls_syntax.h>
 
@@ -11,6 +12,7 @@ namespace MLS_NAMESPACE {
 
 using MLS_NAMESPACE::hpke::Certificate; // NOLINT(misc-unused-using-decls)
 using MLS_NAMESPACE::hpke::Signature;   // NOLINT(misc-unused-using-decls)
+using MLS_NAMESPACE::hpke::UserInfoVC;  // NOLINT(misc-unused-using-decls)
 
 static const Signature&
 find_signature(Signature::ID id)
@@ -113,17 +115,57 @@ operator==(const X509Credential& lhs, const X509Credential& rhs)
 ///
 /// UserInfoVCCredential
 ///
-UserInfoVCCredential::UserInfoVCCredential(bytes userinfo_vc_jwt)
-  : userinfo_vc_jwt(std::move(userinfo_vc_jwt))
+UserInfoVCCredential::UserInfoVCCredential(std::string userinfo_vc_jwt_in)
+  : userinfo_vc_jwt(std::move(userinfo_vc_jwt_in))
+  , _vc(std::make_shared<hpke::UserInfoVC>(userinfo_vc_jwt))
 {
 }
 
 bool
 // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
-UserInfoVCCredential::valid_for(const SignaturePublicKey& /* pub */) const
+UserInfoVCCredential::valid_for(const SignaturePublicKey& pub) const
 {
-  // TODO(RLB) Extract payload -> did:jwk, compare
-  throw NotImplementedError();
+  const auto& vc_pub = _vc->public_key();
+  return pub.data == vc_pub.sig.serialize(*vc_pub.key);
+}
+
+bool
+UserInfoVCCredential::valid_from(const PublicJWK& pub) const
+{
+  const auto& sig = _vc->signature_algorithm();
+  if (pub.signature_scheme != tls_signature_scheme(sig.id)) {
+    return false;
+  }
+
+  const auto sig_pub = sig.deserialize(pub.public_key.data);
+  return _vc->valid_from(*sig_pub);
+}
+
+tls::ostream
+operator<<(tls::ostream& str, const UserInfoVCCredential& obj)
+{
+  return str << from_ascii(obj.userinfo_vc_jwt);
+}
+
+tls::istream
+operator>>(tls::istream& str, UserInfoVCCredential& obj)
+{
+  auto jwt = bytes{};
+  str >> jwt;
+  obj = UserInfoVCCredential(to_ascii(jwt));
+  return str;
+}
+
+bool
+operator==(const UserInfoVCCredential& lhs, const UserInfoVCCredential& rhs)
+{
+  return lhs.userinfo_vc_jwt == rhs.userinfo_vc_jwt;
+}
+
+bool
+operator!=(const UserInfoVCCredential& lhs, const UserInfoVCCredential& rhs)
+{
+  return !(lhs == rhs);
 }
 
 ///
@@ -229,7 +271,7 @@ Credential::multi(const std::vector<CredentialBindingInput>& binding_inputs,
 }
 
 Credential
-Credential::userinfo_vc(const bytes& userinfo_vc_jwt)
+Credential::userinfo_vc(const std::string& userinfo_vc_jwt)
 {
   return { UserInfoVCCredential{ userinfo_vc_jwt } };
 }

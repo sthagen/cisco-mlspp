@@ -419,8 +419,8 @@ struct GroupContext;
 enum struct WireFormat : uint16_t
 {
   reserved = 0,
-  mls_plaintext = 1,
-  mls_ciphertext = 2,
+  mls_public_message = 1,
+  mls_private_message = 2,
   mls_welcome = 3,
   mls_group_info = 4,
   mls_key_package = 5,
@@ -592,6 +592,8 @@ struct PublicMessage
 
   friend tls::ostream& operator<<(tls::ostream& str, const PublicMessage& obj);
   friend tls::istream& operator>>(tls::istream& str, PublicMessage& obj);
+  friend bool operator==(const PublicMessage& lhs, const PublicMessage& rhs);
+  friend bool operator!=(const PublicMessage& lhs, const PublicMessage& rhs);
 
 private:
   GroupContent content;
@@ -651,8 +653,8 @@ struct MLSMessage
   WireFormat wire_format() const;
 
   MLSMessage() = default;
-  MLSMessage(PublicMessage mls_plaintext);
-  MLSMessage(PrivateMessage mls_ciphertext);
+  MLSMessage(PublicMessage public_message);
+  MLSMessage(PrivateMessage private_message);
   MLSMessage(Welcome welcome);
   MLSMessage(GroupInfo group_info);
   MLSMessage(KeyPackage key_package);
@@ -716,10 +718,10 @@ TLS_VARIANT_MAP(MLS_NAMESPACE::SenderType,
 
 TLS_VARIANT_MAP(MLS_NAMESPACE::WireFormat,
                 MLS_NAMESPACE::PublicMessage,
-                mls_plaintext)
+                mls_public_message)
 TLS_VARIANT_MAP(MLS_NAMESPACE::WireFormat,
                 MLS_NAMESPACE::PrivateMessage,
-                mls_ciphertext)
+                mls_private_message)
 TLS_VARIANT_MAP(MLS_NAMESPACE::WireFormat, MLS_NAMESPACE::Welcome, mls_welcome)
 TLS_VARIANT_MAP(MLS_NAMESPACE::WireFormat,
                 MLS_NAMESPACE::GroupInfo,
